@@ -3,7 +3,7 @@ Construction of qLDPC CSS-T Codes in Qiskit
 
 
 ### Results 
-$H_X$ and $H_Z$ generated from Example 17 CSS-T pair
+$H_X$ and $H_Z$ generated from Example 17 (non-puncutred) CSS-T pair
 
 $$
 H_X =
@@ -20,7 +20,9 @@ H_X =
 0 & 0 & 1 & 0 & 1 & 0 & 0 & 0 & 1 & 0 & 0 & 0 & 0 & 0 & 1 & 0 \\
 1 & 1 & 1 & 0 & 1 & 0 & 0 & 0 & 1 & 0 & 0 & 0 & 0 & 0 & 0 & 1
 \end{bmatrix}
+$$
 
+$$
 H_Z =
 \begin{bmatrix}
 1 & 1 & 1 & 1 & 1 & 1 & 1 & 1 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
