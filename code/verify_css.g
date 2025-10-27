@@ -7,7 +7,7 @@ G2:=[
 [1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0]
 ];
 
-Read("parity_mats.gap");
+Read("Qiskit-CSS-T/matrices/parity_mats.gap");
 
 H1 := Hs[1] * Z(2);
 H2 := Hs[2] * Z(2);
