@@ -7,7 +7,7 @@ G2:=[
 [1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0]
 ];
 
-Read("parity_mats.gap");
+Read("Qiskit-CSS-T/matrices/parity_mats.gap");
 
 H1 := Hs[1] * Z(2);
 H2 := Hs[2] * Z(2);
@@ -20,7 +20,7 @@ S := Hx * TransposedMat(Hz);
 Print("HX * HZ^T =\n"); Display(S);
 Print("\nOrthogonality condition holds?  ", S = 0*S, "\n");
 
-filepath := "/Users/mark/advocate/Qiskit-CSS-T/matrices/parity_maps_xz.gap";
+filepath := "Qiskit-CSS-T/matrices/parity_maps_xz.gap";
 file := OutputTextFile(filepath, false);
 PrintTo(file, "Hx := ", Hx, ";\n");
 AppendTo(file, "Hz := ", Hz, ";\n");
