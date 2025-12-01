@@ -196,7 +196,7 @@ def main():
     ns = [4, 6, 8, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64] 
     ps = np.logspace(-3, -1, 20).tolist()
     bias_factor = 0.0
-    num_shots = 1000_000
+    num_shots = 100000
 
     seed = int(datetime.now().timestamp()) + rank * num_shots
     np.random.seed(seed)

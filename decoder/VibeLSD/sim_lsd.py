@@ -168,12 +168,12 @@ def main():
     seed = int(datetime.now().timestamp()) + rank * 10000
     np.random.seed(seed)
 
-    ns = [4, 6, 8, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64]
+    ns = [4, 6, 8, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40]#, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64]
     ps = np.logspace(-3, -1, 20).tolist()
     lsd_order = 50
     max_iter = 1000
     bias_factor = 0.0
-    num_shots = 1000_000
+    num_shots = 100000
 
     results = run_simulation(ns, ps, bias_factor, max_iter, lsd_order, num_shots, comm, rank, size)
 
