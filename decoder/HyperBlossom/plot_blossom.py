@@ -142,7 +142,7 @@ def plot_from_csv(csv_filepath, bias_factor=None, alpha_val=None, shots_val=None
     plot_filename = f"{base_name}_plot.png"
     plt.savefig(plot_filename, bbox_inches='tight')
     print(f"Plot saved as {plot_filename}")
-    plt.show()
+    # plt.show()
 
 def main():
     parser = argparse.ArgumentParser(description="Plot logical error rates from a Hyperion simulation CSV file.")
