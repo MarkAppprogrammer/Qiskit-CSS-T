@@ -151,7 +151,7 @@ def plot_from_csv(csv_filepath, bias_factor=None, alpha_val=None, shots_val=None
     fig.tight_layout(rect=[0, 0, 0.9, 0.96]) 
     plt.savefig(plot_filename, bbox_inches='tight')
     print(f"Plot saved as {plot_filename}")
-    plt.show()
+    # plt.show()
 
 def main():
     parser = argparse.ArgumentParser(description="Plot logical error rates from a BP+LSD simulation CSV file.")
