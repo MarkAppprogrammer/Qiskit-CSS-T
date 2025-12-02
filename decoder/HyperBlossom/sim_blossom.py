@@ -182,7 +182,7 @@ def main():
     size = comm.Get_size()
     ns = [4, 6, 8, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30] 
     ps = np.logspace(-3, -1, 20).tolist()
-    bias_factor = 0.0
+    bias_factor = 0.5
     num_shots = 1000_000
 
     seed = int(datetime.now().timestamp()) + rank * num_shots
