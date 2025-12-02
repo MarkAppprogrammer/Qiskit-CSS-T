@@ -139,7 +139,7 @@ def plot_from_csv(csv_filepath, bias_factor=None, alpha_val=None, shots_val=None
     base_name = os.path.splitext(os.path.basename(csv_filepath))[0]
     fig.tight_layout(rect=[0, 0, 0.9, 0.96]) 
     
-    plot_filename = f"{base_name}_plot.png"
+    plot_filename = f"plot_{base_name}.png"
     plt.savefig(plot_filename, bbox_inches='tight')
     print(f"Plot saved as {plot_filename}")
     # plt.show()
