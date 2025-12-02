@@ -1,24 +1,30 @@
 import galois
 import numpy as np
 import scipy.sparse
+import scipy.stats
 import sys
-import matplotlib.pyplot as plt
 from datetime import datetime
 from ldpc.bplsd_decoder import BpLsdDecoder
 from mpi4py import MPI
 import pandas as pd
+import time
+import os
 
 sys.path.append('../../doubling-CSST/')
 from convert_alist import readAlist
-alistDirPath = "../../doubling-CSST/alistMats/GO03_self_dual/"
 
 # --- Overview of Functions ---
 # self_dual_H(n): Constructs the self-dual parity check matrix H.
-# initialize_decoder(...): Configures the BP+LSD decoder.
+# initialize_decoder(...): Configures the BP+LSD decoder instances (X and Z).
 # generate_errors(...): Simulates the physical noise channel.
-# simulate_single_shot(...): Executes a full QEC cycle.
-# run_simulation(...): Drivers the MPI simulation.
-# save_simulation_data(...): Exports simulation results to a CSV file.
+# simulate_single_shot(...): Executes a full QEC cycle (Syndrome -> Decode -> Logical Check).
+# calc_ci(...): Calculates 95% Clopper-Pearson (exact) confidence intervals.
+# run_simulation(...): Drivers the MPI simulation, aggregates stats, and saves CSV.
+
+alistDirPath = "../../doubling-CSST/alistMats/GO03_self_dual/"
+
+# --- Global Configuration ---
+ALPHA = 0.05
 
 length_dist_dict = {4:2, 6:2, 8:2, 10:2, 12:4, 14:4, 16:4, 18:4, 20:4, 22:6, 24:6, 26:6, 28:6, 30:6, 32:8, 34:6, 36:8, 38:8, 40:8, 42:8, 44:8, 46:8, 48:8, 50:8, 52:10, 54:8, 56:10, 58:10, 60:12, 62:10, 64:10}
 
@@ -64,13 +70,33 @@ def simulate_single_shot(Hx, Hz, Lx, Lz, error_x, error_y, error_z, decoder_x, d
     logical_fail_z = (residual_error_x @ Lz.T) % 2
     return int(logical_fail_x.item()), int(logical_fail_z.item())
 
-def run_simulation(ns, ps, bias_factor, max_iter, lsd_order, total_shots, comm, rank, size):
+def calc_ci(k_arr, n):
+    """
+    Returns (yerr_lower, yerr_upper) arrays for plotting using Clopper-Pearson.
+    Uses global ALPHA.
+    """
+    k = np.array(k_arr)
+    p_hat = k / n
+    
+    # Clopper-Pearson exact interval using Beta distribution
+    lower = scipy.stats.beta.ppf(ALPHA / 2, k, n - k + 1)
+    lower[k == 0] = 0.0 
+    
+    upper = scipy.stats.beta.ppf(1 - ALPHA / 2, k + 1, n - k)
+    upper[k == n] = 1.0 
+    
+    # Distance from mean (for error bars)
+    err_low = p_hat - lower
+    err_high = upper - p_hat
+    
+    return np.vstack((err_low, err_high))
+
+def run_simulation(ns, ps, bias_factor, max_iter, lsd_order, total_shots, comm, rank, size, filename):
     shots_per_proc = total_shots // size
     if rank == 0:
         shots_per_proc += (total_shots % size)
-    results = {"total": [], "x": [], "z": []}
 
-    for n in ns:
+    for i_n, n in enumerate(ns):
         if rank == 0:
             print(f"Simulating for n={n}...", flush=True)
 
@@ -80,9 +106,12 @@ def run_simulation(ns, ps, bias_factor, max_iter, lsd_order, total_shots, comm, 
         local_total_counts = np.zeros(len(ps), dtype=np.int64)
         local_x_counts = np.zeros(len(ps), dtype=np.int64)
         local_z_counts = np.zeros(len(ps), dtype=np.int64)
+        local_cpu_times = np.zeros(len(ps), dtype=np.float64)
 
         for idx, error_rate in enumerate(ps):
             bp_lsd_x, bp_lsd_z = initialize_decoder(Hx, Hz, error_rate, lsd_order, max_iter)
+            
+            start_time = time.time()
             error_x_local, error_y_local, error_z_local = generate_errors(shots_per_proc, Hx, error_rate, bias_factor)
 
             for i in range(shots_per_proc):
@@ -94,93 +123,79 @@ def run_simulation(ns, ps, bias_factor, max_iter, lsd_order, total_shots, comm, 
                 if fail_x: local_x_counts[idx] += 1
                 if fail_z: local_z_counts[idx] += 1
                 if fail_x or fail_z: local_total_counts[idx] += 1
+            
+            end_time = time.time()
+            local_cpu_times[idx] = end_time - start_time
         
         global_total_counts = np.zeros(len(ps), dtype=np.int64) if rank == 0 else None
         global_x_counts = np.zeros(len(ps), dtype=np.int64) if rank == 0 else None
         global_z_counts = np.zeros(len(ps), dtype=np.int64) if rank == 0 else None
+        global_cpu_times = np.zeros(len(ps), dtype=np.float64) if rank == 0 else None
 
         comm.Reduce(local_total_counts, global_total_counts, op=MPI.SUM, root=0)
         comm.Reduce(local_x_counts, global_x_counts, op=MPI.SUM, root=0)
         comm.Reduce(local_z_counts, global_z_counts, op=MPI.SUM, root=0)
+        comm.Reduce(local_cpu_times, global_cpu_times, op=MPI.SUM, root=0)
 
-        # Process results on Rank 0
         if rank == 0:
-            results["total"].append(global_total_counts / total_shots)
-            results["x"].append(global_x_counts / total_shots)
-            results["z"].append(global_z_counts / total_shots)
+            total_ler = global_total_counts / total_shots
+            x_ler = global_x_counts / total_shots
+            z_ler = global_z_counts / total_shots
+            avg_cpu_time = global_cpu_times / total_shots
 
-    return results
+            # Calculate Exact Confidence Intervals
+            total_ci_err = calc_ci(global_total_counts, total_shots)
+            x_ci_err = calc_ci(global_x_counts, total_shots)
+            z_ci_err = calc_ci(global_z_counts, total_shots)
 
-def save_simulation_data(ns, ps, results, timestamp):
-    """
-    Saves the simulation results to a CSV file.
-    """
-    filename = f"bplsd_data_{timestamp}.csv"
-    
-    data_rows = []
-    for i, n in enumerate(ns):
-        for j, p in enumerate(ps):
-            row = {
-                'n': n,
-                'p': p,
-                'total_logical_error_rate': results['total'][i][j],
-                'x_logical_error_rate': results['x'][i][j],
-                'z_logical_error_rate': results['z'][i][j]
-            }
-            data_rows.append(row)
+            data_rows = []
+            for j, p in enumerate(ps):
+                row = {
+                    'n': n,
+                    'p': p,
+                    'shots': total_shots,
+                    'total_logical_error_rate': total_ler[j],
+                    'total_err_low': total_ci_err[0][j],
+                    'total_err_high': total_ci_err[1][j],
+                    'x_logical_error_rate': x_ler[j],
+                    'x_err_low': x_ci_err[0][j],
+                    'x_err_high': x_ci_err[1][j],
+                    'z_logical_error_rate': z_ler[j],
+                    'z_err_low': z_ci_err[0][j],
+                    'z_err_high': z_ci_err[1][j],
+                    'average_cpu_time_seconds': avg_cpu_time[j]
+                }
+                data_rows.append(row)
             
-    df = pd.DataFrame(data_rows)
-    df.to_csv(filename, index=False)
-    print(f"Data saved to {filename}")
-
-def plot_combined_results(ns, ps, bias_factor, results, timestamp):
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6), sharey=True)
-    titles = ["Total Logical Error", "Logical X-side Error", "Logical Z-side Error"]
-    keys = ["total", "x", "z"]
-    
-    for i, ax in enumerate(axes):
-        key = keys[i]
-        data_matrix = results[key]
-        for j, n in enumerate(ns):
-            d = length_dist_dict[n]
-            ax.plot(ps, data_matrix[j], marker='o', linestyle='-', label=f'n={n}, d={d}')
-        ax.plot(ps, ps, linestyle='--', color='black', label='Break-even', alpha=0.5)
-        ax.set_xscale('log')
-        ax.set_yscale('log')
-        ax.set_xlabel('Physical Error Rate (p)')
-        ax.set_title(titles[i])
-        ax.grid(True, which="both", ls="--", alpha=0.4)
-        if i == 0: ax.set_ylabel('Logical Error Rate')
-        if i == 2: ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), title="n, d")
-
-    plt.suptitle(f'BP+LSD Logical Error Rates (Bias Factor: {bias_factor})', fontsize=16)
-    plot_filename = f"bplsd_plot_{timestamp}.png"
-    plt.tight_layout()
-    plt.savefig(plot_filename, bbox_inches='tight')
-    print(f"Plot saved as {plot_filename}")
+            df = pd.DataFrame(data_rows)
+            header = i_n == 0
+            df.to_csv(filename, mode='a', index=False, header=header)
 
 def main():
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     size = comm.Get_size()
     
-    # Different seed for each rank
     seed = int(datetime.now().timestamp()) + rank * 10000
     np.random.seed(seed)
 
-    ns = [4, 6, 8, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40]#, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64]
+    ns = [4, 6, 8, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30]
     ps = np.logspace(-3, -1, 20).tolist()
     lsd_order = 50
     max_iter = 1000
     bias_factor = 0.0
     num_shots = 100000
 
-    results = run_simulation(ns, ps, bias_factor, max_iter, lsd_order, num_shots, comm, rank, size)
+    filename_base = f"bplsd_bias{bias_factor}_alpha{ALPHA}_shots{num_shots}"
+    filename = f"{filename_base}.csv"
 
     if rank == 0:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        save_simulation_data(ns, ps, results, timestamp)
-        plot_combined_results(ns, ps, bias_factor, results, timestamp)
+        if os.path.exists(filename): os.remove(filename)
+
+    run_simulation(ns, ps, bias_factor, max_iter, lsd_order, num_shots, comm, rank, size, filename)
+
+    if rank == 0:
+        print("Simulation finished.")
 
 if __name__ == "__main__":
     main()
