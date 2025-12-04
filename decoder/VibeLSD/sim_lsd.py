@@ -183,8 +183,8 @@ def main():
     ps = np.logspace(-3, -1, 20).tolist()
     lsd_order = 50
     max_iter = 1000
-    bias_factor = 0.0
-    num_shots = 100000
+    bias_factor = 0.5
+    num_shots = 1000_000
 
     filename_base = f"bplsd_bias{bias_factor}_alpha{ALPHA}_shots{num_shots}"
     filename = f"{filename_base}.csv"
