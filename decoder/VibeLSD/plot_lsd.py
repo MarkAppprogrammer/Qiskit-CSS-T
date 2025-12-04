@@ -140,7 +140,6 @@ def plot_from_csv(csv_filepath, bias_factor=None, alpha_val=None, shots_val=None
     suptitle = 'BP+LSD Logical Error Rates'
     params = []
     if bias_factor is not None: params.append(f"Bias: {bias_factor}")
-    if alpha_val is not None: params.append(f"Alpha: {alpha_val}")
     if params: suptitle += f" ({', '.join(params)})"
 
     fig.suptitle(suptitle, fontsize=24)
