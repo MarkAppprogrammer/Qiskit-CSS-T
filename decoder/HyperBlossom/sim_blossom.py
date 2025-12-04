@@ -13,14 +13,6 @@ import time
 sys.path.append('../../doubling-CSST/')
 from convert_alist import readAlist
 
-# --- Overview of Functions ---
-# self_dual_H(n): Constructs the self-dual parity check matrix H from alist files.
-# initialize_decoder(...): Configures the Hyperion (MWPF) solver with weighted hyperedges.
-# generate_errors(...): Simulates the physical noise channel (biased/depolarizing).
-# simulate_single_shot(...): Executes a full QEC cycle (Syndrome -> Decode -> Logical Check).
-# calc_ci(...): Calculates 95% Clopper-Pearson (exact) confidence intervals.
-# run_simulation(...): Drives the MPI simulation, aggregates stats across ranks, and saves to CSV.
-
 # --- Global Configuration ---
 DEFAULT_WEIGHT = 100
 ALPHA = 0.05
@@ -172,9 +164,19 @@ def run_simulation(ns, ps, bias_factor, total_shots, comm, rank, size, filename)
                 }
                 data_rows.append(row)
             
-            df = pd.DataFrame(data_rows)
-            header = i == 0
-            df.to_csv(filename, mode='a', index=False, header=header)
+            new_df = pd.DataFrame(data_rows)
+
+            if os.path.exists(filename):
+                try:
+                    existing_df = pd.read_csv(filename)
+                    existing_df = existing_df[existing_df['n'] != n]
+                    final_df = pd.concat([existing_df, new_df], ignore_index=True)
+                    final_df = final_df.sort_values(by=['n', 'p'])
+                except pd.errors.EmptyDataError:
+                    final_df = new_df
+            else:
+                final_df = new_df
+            final_df.to_csv(filename, index=False)
 
 def main():
     comm = MPI.COMM_WORLD
@@ -190,9 +192,6 @@ def main():
 
     filename_base = f"hyperion_bias{bias_factor}_alpha{ALPHA}_shots{num_shots}"
     filename = f"{filename_base}.csv"
-
-    if rank == 0:
-        if os.path.exists(filename): os.remove(filename)
 
     run_simulation(ns, ps, bias_factor, num_shots, comm, rank, size, filename)
 
