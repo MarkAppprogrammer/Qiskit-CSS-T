@@ -5,11 +5,7 @@ import re
 import matplotlib.pyplot as plt
 import numpy as np
 
-length_dist_dict = {
-    4: 2, 6: 2, 8: 2, 10: 2, 12: 4, 14: 4, 16: 4, 18: 4, 20: 4, 22: 6, 24: 6,
-    26: 6, 28: 6, 30: 6, 32: 8, 34: 6, 36: 8, 38: 8, 40: 8, 42: 8, 44: 8, 46: 8,
-    48: 8, 50: 8, 52: 10, 54: 8, 56: 10, 58: 10, 60: 12, 62: 10, 64: 10
-}
+length_dist_dict = {7:3, 17:5, 23:7, 47:11, 79:15, 103:19, 167:23} 
 
 def plot_from_csv(csv_filepath, bias_factor=None, alpha_val=None, shots_val=None):
     try:

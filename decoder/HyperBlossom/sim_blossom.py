@@ -17,18 +17,23 @@ from convert_alist import readAlist
 DEFAULT_WEIGHT = 100
 ALPHA = 0.05
 
-alistDirPath = "../../doubling-CSST/alistMats/GO03_self_dual/"
-length_dist_dict = {4:2, 6:2, 8:2, 10:2, 12:4, 14:4, 16:4, 18:4, 20:4, 22:6, 24:6, 26:6, 28:6, 30:6, 32:8, 34:6, 36:8, 38:8, 40:8, 42:8, 44:8, 46:8, 48:8, 50:8, 52:10, 54:8, 56:10, 58:10, 60:12, 62:10, 64:10}
+alistDirPath = "../../doubling-CSST/alistMats/QR_dual_containing/" 
+length_dist_dict = {7:3, 17:5, 23:7, 47:11, 79:15, 103:19, 167:23} 
 
-def self_dual_H(n):
-    d = length_dist_dict[n]
-    F2 = galois.GF(2)
-    alistFilePath = alistDirPath + "n" + str(n) + "_d" + str(d) + ".alist"
-    GenMat = F2(readAlist(alistFilePath))
-    G_punctured = GenMat[:, :-1]
-    H_punctured = G_punctured.null_space()
-    H = scipy.sparse.csr_matrix(np.array(H_punctured, dtype=int))
-    return H
+def H(n, if_self_dual=False):
+	d = length_dist_dict[n]
+	F2 = galois.GF(2)
+	alistFilePath = alistDirPath + "n" + str(n) + "_d" + str(d) + ".alist"
+	GenMat = F2(readAlist(alistFilePath))
+	
+	if if_self_dual:
+		G_punctured = GenMat[:, :-1]
+		H_punctured = G_punctured.null_space()
+	else:
+		H_punctured = GenMat.null_space() 
+
+	H = scipy.sparse.csr_matrix(np.array(H_punctured, dtype=int))
+	return H
 
 def initialize_decoder(matrix, weight):
     mat_np = matrix.toarray().astype(int)
@@ -103,7 +108,7 @@ def run_simulation(ns, ps, bias_factor, total_shots, comm, rank, size, filename)
     for i, n in enumerate(ns):
         if rank == 0: print(f"Simulating for n={n}...", flush=True)
             
-        Hx = Hz = self_dual_H(n)
+        Hx = Hz = H(n)
         Lx = Lz = np.ones((1, Hx.shape[1]), dtype=int)
         H_CSS = scipy.sparse.block_diag((Hx, Hz))
         hyperion = initialize_decoder(H_CSS, DEFAULT_WEIGHT)
@@ -182,15 +187,15 @@ def main():
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     size = comm.Get_size()
-    ns = [4, 6, 8, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30] 
+    ns = [7, 17, 23, 47, 79, 103, 167]
     ps = np.logspace(-3, -1, 20).tolist()
     bias_factor = 0.5
-    num_shots = 1000_000
+    num_shots = 100_000
 
     seed = int(datetime.now().timestamp()) + rank * num_shots
     np.random.seed(seed)
 
-    filename_base = f"hyperion_bias{bias_factor}_alpha{ALPHA}_shots{num_shots}"
+    filename_base = f"hyperion_bias{bias_factor}_shots{num_shots}"
     filename = f"{filename_base}.csv"
 
     run_simulation(ns, ps, bias_factor, num_shots, comm, rank, size, filename)
