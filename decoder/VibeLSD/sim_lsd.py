@@ -13,17 +13,8 @@ import os
 sys.path.append('../../doubling-CSST/')
 from convert_alist import readAlist
 
-# --- Overview of Functions ---
-# self_dual_H(n): Constructs the self-dual parity check matrix H.
-# initialize_decoder(...): Configures the BP+LSD decoder instances (X and Z).
-# generate_errors(...): Simulates the physical noise channel.
-# simulate_single_shot(...): Executes a full QEC cycle (Syndrome -> Decode -> Logical Check).
-# calc_ci(...): Calculates 95% Clopper-Pearson (exact) confidence intervals.
-# run_simulation(...): Drivers the MPI simulation, aggregates stats, and saves CSV.
-
-alistDirPath = "../../doubling-CSST/alistMats/GO03_self_dual/"
-
 # --- Global Configuration ---
+alistDirPath = "../../doubling-CSST/alistMats/GO03_self_dual/"
 ALPHA = 0.05
 
 length_dist_dict = {4:2, 6:2, 8:2, 10:2, 12:4, 14:4, 16:4, 18:4, 20:4, 22:6, 24:6, 26:6, 28:6, 30:6, 32:8, 34:6, 36:8, 38:8, 40:8, 42:8, 44:8, 46:8, 48:8, 50:8, 52:10, 54:8, 56:10, 58:10, 60:12, 62:10, 64:10}
@@ -71,24 +62,14 @@ def simulate_single_shot(Hx, Hz, Lx, Lz, error_x, error_y, error_z, decoder_x, d
     return int(logical_fail_x.item()), int(logical_fail_z.item())
 
 def calc_ci(k_arr, n):
-    """
-    Returns (yerr_lower, yerr_upper) arrays for plotting using Clopper-Pearson.
-    Uses global ALPHA.
-    """
     k = np.array(k_arr)
     p_hat = k / n
-    
-    # Clopper-Pearson exact interval using Beta distribution
     lower = scipy.stats.beta.ppf(ALPHA / 2, k, n - k + 1)
     lower[k == 0] = 0.0 
-    
     upper = scipy.stats.beta.ppf(1 - ALPHA / 2, k + 1, n - k)
     upper[k == n] = 1.0 
-    
-    # Distance from mean (for error bars)
     err_low = p_hat - lower
     err_high = upper - p_hat
-    
     return np.vstack((err_low, err_high))
 
 def run_simulation(ns, ps, bias_factor, max_iter, lsd_order, total_shots, comm, rank, size, filename):
@@ -142,8 +123,6 @@ def run_simulation(ns, ps, bias_factor, max_iter, lsd_order, total_shots, comm, 
             x_ler = global_x_counts / total_shots
             z_ler = global_z_counts / total_shots
             avg_cpu_time = global_cpu_times / total_shots
-
-            # Calculate Exact Confidence Intervals
             total_ci_err = calc_ci(global_total_counts, total_shots)
             x_ci_err = calc_ci(global_x_counts, total_shots)
             z_ci_err = calc_ci(global_z_counts, total_shots)
@@ -167,9 +146,18 @@ def run_simulation(ns, ps, bias_factor, max_iter, lsd_order, total_shots, comm, 
                 }
                 data_rows.append(row)
             
-            df = pd.DataFrame(data_rows)
-            header = i_n == 0
-            df.to_csv(filename, mode='a', index=False, header=header)
+            new_df = pd.DataFrame(data_rows)
+            if os.path.exists(filename):
+                try:
+                    existing_df = pd.read_csv(filename)
+                    existing_df = existing_df[existing_df['n'] != n]
+                    final_df = pd.concat([existing_df, new_df], ignore_index=True)
+                    final_df = final_df.sort_values(by=['n', 'p'])
+                except pd.errors.EmptyDataError:
+                    final_df = new_df
+            else:
+                final_df = new_df
+            final_df.to_csv(filename, index=False)
 
 def main():
     comm = MPI.COMM_WORLD
@@ -179,18 +167,15 @@ def main():
     seed = int(datetime.now().timestamp()) + rank * 10000
     np.random.seed(seed)
 
-    ns = [4, 6, 8, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30]
+    ns = [4, 6, 8, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30] 
     ps = np.logspace(-3, -1, 20).tolist()
-    lsd_order = 50
+    lsd_order = 20
     max_iter = 1000
-    bias_factor = 0.0
-    num_shots = 100000
+    bias_factor = 0.5
+    num_shots = 100_000
 
     filename_base = f"bplsd_bias{bias_factor}_alpha{ALPHA}_shots{num_shots}"
     filename = f"{filename_base}.csv"
-
-    if rank == 0:
-        if os.path.exists(filename): os.remove(filename)
 
     run_simulation(ns, ps, bias_factor, max_iter, lsd_order, num_shots, comm, rank, size, filename)
 

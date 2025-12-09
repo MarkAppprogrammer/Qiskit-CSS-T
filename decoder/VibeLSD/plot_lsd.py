@@ -101,7 +101,7 @@ def plot_from_csv(csv_filepath, bias_factor=None, alpha_val=None, shots_val=None
         if shots_val:
             res_limit = 1.0 / shots_val
             ax.axhline(y=res_limit, color='gray', linestyle='--', linewidth=1.5, alpha=0.7)
-            ax.text(ps[0], res_limit * 1.1, f" Resolution Limit (1/N)", color='gray', fontsize=12, va='bottom')
+            ax.text(ps[-1], res_limit * 1.1, "Resolution Limit ", color='gray', fontsize=12, va='bottom', ha='right')
             ax.fill_between(ps, 0, res_limit, color='gray', alpha=0.1)
 
         ax.set_xscale('log')
@@ -140,13 +140,12 @@ def plot_from_csv(csv_filepath, bias_factor=None, alpha_val=None, shots_val=None
     suptitle = 'BP+LSD Logical Error Rates'
     params = []
     if bias_factor is not None: params.append(f"Bias: {bias_factor}")
-    if alpha_val is not None: params.append(f"Alpha: {alpha_val}")
     if params: suptitle += f" ({', '.join(params)})"
 
     fig.suptitle(suptitle, fontsize=24)
     
     base_name = os.path.splitext(os.path.basename(csv_filepath))[0]
-    plot_filename = f"{base_name}_plot.png"
+    plot_filename = f"plot_{base_name}.png"
     
     fig.tight_layout(rect=[0, 0, 0.9, 0.96]) 
     plt.savefig(plot_filename, bbox_inches='tight')
