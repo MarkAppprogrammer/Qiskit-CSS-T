@@ -101,7 +101,13 @@ def plot_from_csv(csv_filepath, bias_factor=None, alpha_val=0.05, shots_val=None
     fig.legend(*ax_total.get_legend_handles_labels(), loc='center right', bbox_to_anchor=(1.1, 0.5))
     fig.suptitle(f'Hyperion Decoder Performance (Bias: {bias_factor})', fontsize=22)
     plt.tight_layout(rect=[0, 0, 0.9, 0.95])
-    plt.show()
+    
+    # Save the plot to a file
+    output_filename = os.path.splitext(csv_filepath)[0] + ".png"
+    plt.savefig(output_filename, bbox_inches='tight')
+    print(f"Plot saved to {output_filename}")
+    
+    # plt.show()
 
 # Execute
 plot_from_csv(CSV_FILEPATH, BIAS_FACTOR, ALPHA, SHOTS)
