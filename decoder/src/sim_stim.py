@@ -75,10 +75,6 @@ def find_logical_z_operator(Hx: np.ndarray, Hz: np.ndarray) -> np.ndarray:
 # --- Section 2: Circuit Generation ---
 
 def generate_css_memory_experiment(Hx: np.ndarray, Hz: np.ndarray, rounds: int) -> stim.Circuit:
-    """
-    Generates a CLEAN circuit (no noise). Noise is applied later by the noise models.
-    Added 'TICK' instructions to support time-step based noise models.
-    """
     check_css_validity(Hx, Hz)
     num_data = Hx.shape[1]
     num_x_checks = Hx.shape[0]
@@ -100,7 +96,7 @@ def generate_css_memory_experiment(Hx: np.ndarray, Hz: np.ndarray, rounds: int) 
             for t in targets:
                 c.append("CX", [ancilla, t])
         c.append("H", x_ancillas)
-        c.append("M", x_ancillas) # Note: Removed explicit noise_p here, handled by noise model
+        c.append("M", x_ancillas) 
         
         for check_idx, row in enumerate(Hz):
             targets = [data_qubits[q] for q in np.flatnonzero(row)]
@@ -109,7 +105,7 @@ def generate_css_memory_experiment(Hx: np.ndarray, Hz: np.ndarray, rounds: int) 
                 c.append("CX", [t, ancilla])
         c.append("M", z_ancillas)
         c.append("R", x_ancillas + z_ancillas)
-        c.append("TICK") # Crucial for noise models to identify rounds
+        c.append("TICK")
 
         total_measurements_per_round = num_x_checks + num_z_checks
         
@@ -166,7 +162,7 @@ def generate_experiment_with_noise(Hx: np.ndarray, Hz: np.ndarray, rounds: int,
     num_data = Hx.shape[1]
     num_check = Hx.shape[0] + Hz.shape[0]
     data_qubits = list(range(num_data))
-    all_qubits = list(range(num_data + num_check)) # Assuming compact indices
+    all_qubits = list(range(num_data + num_check)) 
     
     base_p = noise_params.get('p', 0.001) if noise_params else 0.001
 
@@ -184,7 +180,7 @@ def generate_experiment_with_noise(Hx: np.ndarray, Hz: np.ndarray, rounds: int,
         return si1000_noise_model(
             circuit=clean_circuit, 
             data_qubits=data_qubits, 
-            all_qubits=all_qubits, # Passed for idle noise calculations
+            all_qubits=all_qubits, 
             probability=base_p
         )
     elif noise_model_name == "bravyi":
@@ -195,13 +191,19 @@ def generate_experiment_with_noise(Hx: np.ndarray, Hz: np.ndarray, rounds: int,
 # --- Section 3: Data Processing ---
 
 def parse_and_average_stats(stats: List[sinter.TaskStats], trace_file: str) -> pd.DataFrame:
-    print("Parsing detailed MWPF trace...")
+    print(f"Parsing detailed MWPF trace from {trace_file}...")
     try:
         df_details = SinterMWPFDecoder.parse_mwpf_trace(trace_file)
-        avg_obj = df_details['objective_value'].mean()
-        avg_cpu = df_details['cpu_time'].mean()
-    except Exception:
-        print("Warning: Could not parse MWPF trace. Using default values.")
+        # Use mean if available, else 0. 
+        # Note: If no events were logged, df_details might be empty.
+        if not df_details.empty:
+            avg_obj = df_details['objective_value'].mean()
+            avg_cpu = df_details['cpu_time'].mean()
+        else:
+            avg_obj = 0.0
+            avg_cpu = 0.0
+    except Exception as e:
+        print(f"Warning: Could not parse MWPF trace ({e}). Using default values.")
         avg_obj = 0.0
         avg_cpu = 0.0
     
@@ -211,6 +213,7 @@ def parse_and_average_stats(stats: List[sinter.TaskStats], trace_file: str) -> p
         logical_err = s.errors / s.shots if s.shots > 0 else 0
         results.append({
             'n': m['n'], 'd': m['d'], 'r': m['r'], 'p': m['p'],
+            'noise_model': m['noise_model'],
             'shots': s.shots, 'errors': s.errors,
             'total_logical_error_rate': logical_err,
             'mean_objective_value': avg_obj,
@@ -224,67 +227,80 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--workers", type=int, default=os.cpu_count())
     parser.add_argument("--max_shots", type=int, default=100_000)
-    parser.add_argument("--output", type=str, default="hyperion_results.csv")
+    parser.add_argument("--output_base", type=str, default="hyperion_results", help="Base filename without extension")
     args = parser.parse_args()
 
     # Parameters
     noise_values = [0.008, 0.009, 0.01, 0.011, 0.012]
-    n_list = [7, 23] 
-
-    tasks = []
-    print(f"Generating tasks for noise model: si1000")
+    n_list = [7] 
     
-    for n in n_list:
-        try:
-            d = LENGTH_DIST_DICT[n]
-            Hx, Hz = get_parity_matrices(n, if_self_dual=True)
-            num_rounds = d * 3  # Requirement: rounds = 3 * d
+    # Models to run
+    target_models = ["depolarizing", "si1000"]
 
-            for p in noise_values:
-                # Calls the wrapper which calls the refactored noise model
-                circuit = generate_experiment_with_noise(
-                    Hx=Hx, Hz=Hz, rounds=num_rounds, 
-                    noise_model_name="si1000", 
-                    noise_params={"p": p}
-                )
-                
-                tasks.append(
-                    sinter.Task(
-                        circuit=circuit,
-                        decoder='mwpf',
-                        json_metadata={'n': n, 'd': d, 'r': num_rounds, 'p': p}
+    for model_name in target_models:
+        print(f"\n{'='*60}")
+        print(f"Running simulation for model: {model_name}")
+        print(f"{'='*60}")
+
+        tasks = []
+        for n in n_list:
+            try:
+                d = LENGTH_DIST_DICT[n]
+                Hx, Hz = get_parity_matrices(n, if_self_dual=True)
+                num_rounds = d * 3 
+
+                for p in noise_values:
+                    circuit = generate_experiment_with_noise(
+                        Hx=Hx, Hz=Hz, rounds=num_rounds, 
+                        noise_model_name=model_name, 
+                        noise_params={"p": p}
                     )
-                )
-        except Exception as e:
-            print(f"Skipping n={n}: {e}")
+                    
+                    tasks.append(
+                        sinter.Task(
+                            circuit=circuit,
+                            decoder='mwpf',
+                            json_metadata={
+                                'n': n, 'd': d, 'r': num_rounds, 'p': p, 
+                                'noise_model': model_name
+                            }
+                        )
+                    )
+            except Exception as e:
+                print(f"Skipping n={n} for {model_name}: {e}")
 
-    if not tasks:
-        print("No tasks generated. Exiting.")
-        return
+        if not tasks:
+            print(f"No tasks generated for {model_name}. Skipping.")
+            continue
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as tmp:
-        trace_path = tmp.name
-    
-    try:
-        print(f"Initializing SinterMWPFDecoder with trace: {trace_path}")
-        mwpf_decoder = SinterMWPFDecoder(cluster_node_limit=15, trace_filename=trace_path)
+        # Use a fresh temporary file for each model's trace to avoid data mixing
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as tmp:
+            trace_path = tmp.name
+        
+        try:
+            print(f"Initializing SinterMWPFDecoder with trace: {trace_path}")
+            # Re-initialize decoder for each batch to ensure it points to the new trace file
+            mwpf_decoder = SinterMWPFDecoder(cluster_node_limit=15, trace_filename=trace_path)
 
-        print(f"Starting collection on {args.workers} workers...")
-        collected_stats = sinter.collect(
-            num_workers=args.workers,
-            tasks=tasks,
-            custom_decoders={"mwpf": mwpf_decoder},
-            max_shots=args.max_shots,
-            print_progress=True,
-        )
+            print(f"Starting collection on {args.workers} workers...")
+            collected_stats = sinter.collect(
+                num_workers=args.workers,
+                tasks=tasks,
+                custom_decoders={"mwpf": mwpf_decoder},
+                max_shots=args.max_shots,
+                print_progress=True,
+            )
 
-        final_df = parse_and_average_stats(collected_stats, trace_path)
-        final_df.to_csv(args.output, index=False)
-        print(f"Results saved to {args.output}")
+            final_df = parse_and_average_stats(collected_stats, trace_path)
+            
+            # Construct specific filename for this model
+            output_filename = f"{args.output_base}_{model_name}.csv"
+            final_df.to_csv(output_filename, index=False)
+            print(f"Results for {model_name} saved to {output_filename}")
 
-    finally:
-        if os.path.exists(trace_path):
-            os.remove(trace_path)
+        finally:
+            if os.path.exists(trace_path):
+                os.remove(trace_path)
 
 if __name__ == "__main__":
     main()

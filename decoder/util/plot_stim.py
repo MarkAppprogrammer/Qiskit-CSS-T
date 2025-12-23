@@ -1,15 +1,9 @@
 import pandas as pd
 import os
-import re
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.stats
-
-# --- Configuration: Set your file path here ---
-CSV_FILEPATH = "hyperion_results.csv"  # Update this to your filename
-BIAS_FACTOR = None  # Optional: Will try to extract from filename if None
-ALPHA = 0.05        # 95% Confidence Interval
-SHOTS = None        # Optional: Will try to extract from CSV or filename
+import argparse
 
 length_dist_dict = {7:3, 17:5, 23:7, 47:11, 79:15, 103:19, 167:23}
 
@@ -22,19 +16,19 @@ def calc_ci_for_df(k, n, alpha):
     p_hat = k / n
     return p_hat - lower, upper - p_hat
 
-def plot_from_csv(csv_filepath, bias_factor=None, alpha_val=0.05, shots_val=None):
+def plot_from_csv(csv_filepath, alpha_val=0.05):
     if not os.path.exists(csv_filepath):
         print(f"Error: File '{csv_filepath}' not found.")
         return
 
     df = pd.read_csv(csv_filepath)
-    
-    # Auto-detect parameters if not provided
-    if shots_val is None:
-        shots_val = df['shots'].iloc[0] if 'shots' in df.columns else 100000
-    if bias_factor is None:
-        match = re.search(r"bias([\d\.]+)", csv_filepath)
-        bias_factor = float(match.group(1)) if match else "Unknown"
+
+    # Extract noise model name for the title
+    if 'noise_model' in df.columns:
+        # Assuming the file contains one type of noise model, take the first one
+        noise_model_name = df['noise_model'].iloc[0]
+    else:
+        noise_model_name = "Unknown"
 
     ns = sorted(df['n'].unique())
     ps = sorted(df['p'].unique())
@@ -63,8 +57,9 @@ def plot_from_csv(csv_filepath, bias_factor=None, alpha_val=0.05, shots_val=None
             if subset.empty or key not in subset.columns: continue
             
             d = length_dist_dict.get(n, '?')
-            # Calculate error bars if 'errors' column exists, otherwise use 0
-            if 'errors' in subset.columns:
+            
+            # Calculate error bars using the 'shots' column from the CSV
+            if 'errors' in subset.columns and 'shots' in subset.columns:
                 err_low, err_high = calc_ci_for_df(subset[key]*subset['shots'], subset['shots'], alpha_val)
                 y_err = [err_low, err_high]
             else:
@@ -98,16 +93,24 @@ def plot_from_csv(csv_filepath, bias_factor=None, alpha_val=0.05, shots_val=None
         ax_time.set_ylabel('Seconds / Shot')
         ax_time.grid(True, which="both", ls="--", alpha=0.4)
 
+    # Legend and Title
     fig.legend(*ax_total.get_legend_handles_labels(), loc='center right', bbox_to_anchor=(1.1, 0.5))
-    fig.suptitle(f'Hyperion Decoder Performance for SI1000 Circuit-level Noise Model', fontsize=22)
+    
+    # Dynamic title using extracted noise model name
+    fig.suptitle(f'Hyperion Decoder Performance for {noise_model_name} Noise Model', fontsize=22)
+    
     plt.tight_layout(rect=[0, 0, 0.9, 0.95])
     
     # Save the plot to a file
     output_filename = os.path.splitext(csv_filepath)[0] + ".png"
     plt.savefig(output_filename, bbox_inches='tight')
     print(f"Plot saved to {output_filename}")
-    
-    # plt.show()
 
-# Execute
-plot_from_csv(CSV_FILEPATH, BIAS_FACTOR, ALPHA, SHOTS)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Plot simulation results from CSV.")
+    parser.add_argument("csv_file", type=str, help="Path to the results CSV file")
+    parser.add_argument("--alpha", type=float, default=0.05, help="Alpha value for confidence intervals (default: 0.05)")
+    
+    args = parser.parse_args()
+    
+    plot_from_csv(args.csv_file, args.alpha)

@@ -9,10 +9,8 @@ import stim
 import sinter
 from typing import List, Tuple, Dict
 
-# Ensure local modules (copied by run script) are importable
 sys.path.append(".")
 
-# Fallback path for local dev testing if not running in versioned dir
 if not os.path.exists("convert_alist.py"):
     sys.path.append('../../doubling-CSST/')
 
@@ -205,7 +203,7 @@ def generate_experiment_with_noise(Hx: np.ndarray, Hz: np.ndarray, rounds: int,
 
 # --- Data Processing ---
 
-def parse_and_average_stats(stats: List[sinter.TaskStats], trace_file: str) -> pd.DataFrame:
+def parse_and_average_stats(stats: List[sinter.TaskStats], trace_file: str, model_name: str) -> pd.DataFrame:
     try:
         df_details = SinterMWPFDecoder.parse_mwpf_trace(trace_file)
         avg_obj = df_details['objective_value'].mean()
@@ -219,6 +217,7 @@ def parse_and_average_stats(stats: List[sinter.TaskStats], trace_file: str) -> p
         m = s.json_metadata
         logical_err = s.errors / s.shots if s.shots > 0 else 0
         results.append({
+            'noise_model': model_name,
             'n': m['n'], 'd': m['d'], 'r': m['r'], 'p': m['p'],
             'shots': s.shots, 'errors': s.errors,
             'total_logical_error_rate': logical_err,
@@ -239,60 +238,75 @@ def main():
     parser.add_argument("--output", type=str, default="hyperion_results.csv")
     args = parser.parse_args()
 
+    # Simulation Parameters
+    noise_values = [0.008, 0.009, 0.01, 0.011, 0.012]
+    n_list = [7, 23, 47]
+    
+    # List of models to run sequentially
+    models_to_run = ["depolarizing", "si1000"]
+
     print(f"Running with {args.workers} workers.")
     print(f"Using Alist path: {ALIST_DIR_PATH}")
-    
-    noise_values = [0.008, 0.009, 0.01, 0.011, 0.012]
-    n_list = [7, 23, 47] 
-    tasks = []
-    
-    for n in n_list:
+
+    # Prepare base filename for splitting
+    # e.g., "results_v1234.csv" -> base="results_v1234", ext=".csv"
+    output_base, output_ext = os.path.splitext(args.output)
+
+    for model_name in models_to_run:
+        print(f"\n=== Generating tasks for model: {model_name} ===")
+        tasks = []
+        
+        for n in n_list:
+            try:
+                d = LENGTH_DIST_DICT[n]
+                Hx, Hz = get_parity_matrices(n, if_self_dual=True)
+                num_rounds = d * 3
+
+                for p in noise_values:
+                    circuit = generate_experiment_with_noise(
+                        Hx=Hx, Hz=Hz, rounds=num_rounds, 
+                        noise_model_name=model_name, 
+                        noise_params={"p": p}
+                    )
+                    tasks.append(sinter.Task(
+                        circuit=circuit,
+                        decoder='mwpf',
+                        json_metadata={'n': n, 'd': d, 'r': num_rounds, 'p': p}
+                    ))
+            except Exception as e:
+                print(f"Skipping n={n}: {e}")
+
+        if not tasks:
+            print(f"No tasks generated for {model_name}. Skipping.")
+            continue
+
+        # Create unique temp trace file for this batch
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as tmp:
+            trace_path = tmp.name
+        
         try:
-            d = LENGTH_DIST_DICT[n]
-            Hx, Hz = get_parity_matrices(n, if_self_dual=True)
-            num_rounds = d * 3
+            print(f"Initializing SinterMWPFDecoder (trace: {trace_path})")
+            mwpf_decoder = SinterMWPFDecoder(cluster_node_limit=15, trace_filename=trace_path)
 
-            for p in noise_values:
-                circuit = generate_experiment_with_noise(
-                    Hx=Hx, Hz=Hz, rounds=num_rounds, 
-                    noise_model_name="si1000", 
-                    noise_params={"p": p}
-                )
-                tasks.append(sinter.Task(
-                    circuit=circuit,
-                    decoder='mwpf',
-                    json_metadata={'n': n, 'd': d, 'r': num_rounds, 'p': p}
-                ))
-        except Exception as e:
-            print(f"Skipping n={n}: {e}")
+            print(f"Collecting stats for {model_name}...")
+            collected_stats = sinter.collect(
+                num_workers=args.workers,
+                tasks=tasks,
+                custom_decoders={"mwpf": mwpf_decoder},
+                max_shots=args.max_shots,
+                print_progress=True,
+            )
 
-    if not tasks:
-        print("No tasks generated. Exiting.")
-        return
+            final_df = parse_and_average_stats(collected_stats, trace_path, model_name)
+            
+            # Save separate CSV
+            specific_output_filename = f"{output_base}_{model_name}{output_ext}"
+            final_df.to_csv(specific_output_filename, index=False)
+            print(f"Saved results to: {specific_output_filename}")
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as tmp:
-        trace_path = tmp.name
-    
-    try:
-        print(f"Initializing SinterMWPFDecoder with trace: {trace_path}")
-        mwpf_decoder = SinterMWPFDecoder(cluster_node_limit=15, trace_filename=trace_path)
-
-        print(f"Starting collection...")
-        collected_stats = sinter.collect(
-            num_workers=args.workers,
-            tasks=tasks,
-            custom_decoders={"mwpf": mwpf_decoder},
-            max_shots=args.max_shots,
-            print_progress=True,
-        )
-
-        final_df = parse_and_average_stats(collected_stats, trace_path)
-        final_df.to_csv(args.output, index=False)
-        print(f"Results saved to {args.output}")
-
-    finally:
-        if os.path.exists(trace_path):
-            os.remove(trace_path)
+        finally:
+            if os.path.exists(trace_path):
+                os.remove(trace_path)
 
 if __name__ == "__main__":
     main()
