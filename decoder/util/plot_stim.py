@@ -99,7 +99,7 @@ def plot_from_csv(csv_filepath, bias_factor=None, alpha_val=0.05, shots_val=None
         ax_time.grid(True, which="both", ls="--", alpha=0.4)
 
     fig.legend(*ax_total.get_legend_handles_labels(), loc='center right', bbox_to_anchor=(1.1, 0.5))
-    fig.suptitle(f'Hyperion Decoder Performance (Bias: {bias_factor})', fontsize=22)
+    fig.suptitle(f'Hyperion Decoder Performance for SI1000 Circuit-level Noise Model', fontsize=22)
     plt.tight_layout(rect=[0, 0, 0.9, 0.95])
     
     # Save the plot to a file
