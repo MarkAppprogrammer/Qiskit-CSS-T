@@ -12,19 +12,9 @@ from typing import List, Tuple, Dict
 # Add paths
 sys.path.append('../../doubling-CSST/')
 
-# Imports
-try:
-    from convert_alist import readAlist
-    from mwpf.sinter_decoders import SinterMWPFDecoder
-    # Import the refactored noise models
-    from noise_models import (
-        standard_depolarizing_noise_model, 
-        si1000_noise_model, 
-        bravyi_noise_model
-    )
-except ImportError as e:
-    print(f"Import Error: {e}. Check paths.")
-    sys.exit(1)
+from convert_alist import readAlist
+from mwpf.sinter_decoders import SinterMWPFDecoder
+from noise_models import standard_depolarizing_noise_model, si1000_noise_model, bravyi_noise_model
 
 ALIST_DIR_PATH = "../../doubling-CSST/alistMats/QR_dual_containing/" 
 LENGTH_DIST_DICT = {7:3, 17:5, 23:7, 47:11, 79:15, 103:19, 167:23} 
@@ -239,7 +229,7 @@ def main():
 
     # Parameters
     noise_values = [0.008, 0.009, 0.01, 0.011, 0.012]
-    n_list = [7] 
+    n_list = [7, 23] 
 
     tasks = []
     print(f"Generating tasks for noise model: si1000")
