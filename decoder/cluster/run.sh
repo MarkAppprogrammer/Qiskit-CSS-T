@@ -1,8 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=Stim_MWPF
-#SBATCH --partition=debug
-#SBATCH --nodes=1
+#SBATCH --partition=normal
+#SBATCH --nodes=3
+#SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
+#SBATCH --output=logs/slurm_%j.out
+#SBATCH --error=logs/slurm_%j.err
 
 # --- CONFIGURATION ---
 # Base directories
@@ -14,7 +17,9 @@ readonly SRC_PYTHON_SCRIPT="$BASE_DIR/src/mpi_stim.py"
 readonly SRC_DEP_NOISE="$BASE_DIR/src/noise_models.py"
 readonly SRC_DEP_CIRCUIT="$BASE_DIR/src/circuit.py"
 readonly SRC_DEP_CONVERT="$BASE_DIR/../doubling-CSST/convert_alist.py"
-readonly SRC_ALIST_DIR="$BASE_DIR/../doubling-CSST/alistMats/QR_dual_containing/"
+
+# CHANGE 1: Point to the PARENT alist directory, not the subdirectory
+readonly SRC_ALIST_ROOT="$BASE_DIR/../doubling-CSST/alistMats"
 
 readonly PYTHON_FILENAME="mpi_stim.py"
 readonly NOISE_FILENAME="noise_models.py"
@@ -30,7 +35,8 @@ submission_preflight_checks() {
     [[ -f "$SRC_PYTHON_SCRIPT" ]] || log_error "Python script not found at: $SRC_PYTHON_SCRIPT"
     [[ -f "$SRC_DEP_NOISE" ]] || log_error "Noise dependency not found at: $SRC_DEP_NOISE"
     [[ -f "$SRC_DEP_CIRCUIT" ]] || log_error "Circuit dependency not found at: $SRC_DEP_CIRCUIT"
-    [[ -d "$SRC_ALIST_DIR" ]] || log_error "Alist directory not found at: $SRC_ALIST_DIR"
+    # CHANGE 2: Check the root alist directory
+    [[ -d "$SRC_ALIST_ROOT" ]] || log_error "Alist root directory not found at: $SRC_ALIST_ROOT"
     log_info "Pre-flight checks passed."
 }
 
@@ -42,14 +48,18 @@ create_version_directory() {
 
     VERSION_DIR="$DATA_ROOT/$new_version_num"
     mkdir -p "$VERSION_DIR/logs/"
-    mkdir -p "$VERSION_DIR/alistMats/"
+    
+    # CHANGE 3: We do NOT mkdir alistMats manually, cp -r will handle it
 
     cp "$SRC_PYTHON_SCRIPT" "$VERSION_DIR/$PYTHON_FILENAME"
     cp "$SRC_DEP_NOISE" "$VERSION_DIR/$NOISE_FILENAME"
     cp "$SRC_DEP_CIRCUIT" "$VERSION_DIR/$CIRCUIT_FILENAME"
     cp "$SRC_DEP_CONVERT" "$VERSION_DIR/$CONVERT_FILENAME" || log_info "Warning: convert_alist.py not found, skipping."
     cp "$0" "$VERSION_DIR/run.sh"
-    cp -r "$SRC_ALIST_DIR"/* "$VERSION_DIR/alistMats/"
+
+    # CHANGE 4: Copy the entire alistMats folder recursively
+    # This ensures "GO03_self_dual" and "QR_dual_containing" subfolders exist inside the destination
+    cp -r "$SRC_ALIST_ROOT" "$VERSION_DIR/alistMats"
 
     log_info "Created new version directory: $VERSION_DIR"
 }
@@ -58,6 +68,8 @@ submit_job() {
     log_info "Submitting job from $VERSION_DIR..."
     cd "$VERSION_DIR" || log_error "Could not change to directory $VERSION_DIR"
 
+    # Default logic: Submit two jobs (one for each code type) or just one generic
+    # For now, let's just submit one job that runs the default (or you can edit args here)
     local job_id
     job_id=$(sbatch --output="logs/slurm_%j.out" \
                     --error="logs/slurm_%j.err" \
@@ -79,26 +91,52 @@ run_compute_logic() {
 
     echo "--- Loading Modules ---"
     module purge
-    module load gnu12/12.2.0 openmpi/4.1.5 python/3.10.19
-
+    module load gnu12/12.2.0 openmpi4/4.1.5 python/3.10.19
 
     if [[ -f "$BASE_DIR/.env/bin/activate" ]]; then
-        echo "Activating virtual environment..."
         source "$BASE_DIR/.env/bin/activate"
-    else
-        echo "WARNING: Could not find virtual environment at $BASE_DIR/.env"
-        echo "Ensure you ran: python3 -m venv .env"
-        exit 1
     fi
 
-    echo "--- Starting Sinter Simulation ---"
-    echo "Running on $(hostname) with $SLURM_CPUS_PER_TASK CPUs"
-    echo "Working directory: $PWD"
-
-    # Run the LOCAL copy of the script
-    python "$PYTHON_FILENAME" \
+    echo "--- Starting Distributed Sinter Simulation ---"
+    echo "Nodes: $SLURM_NNODES"
+    echo "Cores per Node: $SLURM_CPUS_PER_TASK"
+    
+    # 1. RUN PARALLEL (You can change --code_type here if needed, or pass it as an arg to sbatch)
+    # Defaulting to dual_containing as requested in previous contexts
+    
+    echo "Running Dual Containing..."
+    srun python "$PYTHON_FILENAME" \
         --workers "$SLURM_CPUS_PER_TASK" \
-        --output "results_v${SLURM_JOB_ID}.csv"
+        --output "results_v${SLURM_JOB_ID}_dual.csv" \
+        --code_type "dual_containing"
+
+    # Uncomment below to run self_dual as well in the same job, 
+    # OR submit a separate job with --code_type self_dual
+    
+    # echo "Running Self Dual..."
+    # srun python "$PYTHON_FILENAME" \
+    #     --workers "$SLURM_CPUS_PER_TASK" \
+    #     --output "results_v${SLURM_JOB_ID}_self.csv" \
+    #     --code_type "self_dual"
+
+    # 2. MERGE RESULTS (Simple merge for the dual_containing run)
+    echo "--- Merging CSVs ---"
+    
+    for model in "depolarizing" "si1000"; do
+        OUT_FILE="results_v${SLURM_JOB_ID}_dual_${model}.csv"
+        
+        # Merge only if files exist
+        FIRST_FILE=$(ls results_v${SLURM_JOB_ID}_dual_${model}_rank*.csv 2>/dev/null | head -n 1)
+        
+        if [[ -n "$FIRST_FILE" ]]; then
+            head -n 1 "$FIRST_FILE" > "$OUT_FILE"
+            for f in results_v${SLURM_JOB_ID}_dual_${model}_rank*.csv; do
+                tail -n +2 "$f" >> "$OUT_FILE"
+                rm "$f" 
+            done
+            echo "Merged $model results into $OUT_FILE"
+        fi
+    done
 
     echo "--- Job Finished ---"
 }
