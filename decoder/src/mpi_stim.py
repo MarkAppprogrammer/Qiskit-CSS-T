@@ -64,78 +64,109 @@ CODE_CONFIGS = {
 
 # --- Helper Functions ---
 
-def get_parity_matrices(n: int, config: Dict) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Retrieves Hx and Hz based on the configuration dictionary.
-    """
-    dist_dict = config["dist_dict"]
-    alist_dir = config["dir"]
-    is_self_dual_logic = config["if_self_dual"]
-
-    if n not in dist_dict:
-        raise ValueError(f"No distance defined for n={n} in selected code type.")
-    
-    d = dist_dict[n]
-    alist_file_path = os.path.join(alist_dir, f"n{n}_d{d}.alist")
-    
-    if not os.path.exists(alist_file_path):
-        raise FileNotFoundError(f"Alist file not found: {alist_file_path}")
-
+def H(n, if_self_dual=False):
+    d = length_dist_dict[n]
     F2 = galois.GF(2)
-    GenMat = F2(readAlist(alist_file_path))
-
-    # --- Logic Switch based on Option 1 vs Option 2 ---
-    if is_self_dual_logic:
-        # Option 1: Puncture last column
-        # G_punctured = GenMat[:, :-1]
-        H_punctured = GenMat[:, :-1].null_space()
-    else:
-        # Option 2: Direct Null Space
-        H_punctured = GenMat.null_space()
+    alistFilePath = alistDirPath + "n" + str(n) + "_d" + str(d) + ".alist"
+    GenMat = F2(readAlist(alistFilePath))
     
-    # Cast to standard numpy uint8 for Stim
-    return np.array(H_punctured, dtype=np.uint8), np.array(H_punctured, dtype=np.uint8)
+    if if_self_dual:
+        G_punctured = GenMat[:, :-1]  # Puncture the last column
+        # Parity-check matrix of the punctured code
+        H_punctured = G_punctured.null_space() 
+    else:
+        # For GenMat being a dual-containing code, use null-space as parity-check
+        H_punctured = GenMat.null_space() 
 
-def check_css_validity(Hx: np.ndarray, Hz: np.ndarray):
-    if np.any((Hx @ Hz.T) % 2):
-        print(f"CRITICAL WARNING: Hx and Hz do NOT commute!")
+    # --- Construct Hx and Hz ---
+    # For this construction, we use the same matrix for both X and Z checks
+    Hx = H_punctured
+    Hz = H_punctured
 
-def find_logical_z_operator(Hx: np.ndarray, Hz: np.ndarray) -> np.ndarray:
-    num_qubits = Hx.shape[1]
-    candidates = [np.ones(num_qubits, dtype=np.uint8)]
-    for _ in range(100):
-        candidates.append(np.random.randint(0, 2, size=num_qubits).astype(np.uint8))
+    # Convert from Galois Field array to standard Numpy uint8 array
+    # This is crucial for passing them into Stim/Sinter functions
+    Hx = np.array(Hx, dtype=np.uint8)
+    Hz = np.array(Hz, dtype=np.uint8)
 
-    def gf2_rank(rows):
-        rows = np.array(rows, copy=True)
-        pivot_row = 0
-        num_rows, num_cols = rows.shape
-        for col in range(num_cols):
-            if pivot_row >= num_rows: break
-            if rows[pivot_row, col] == 0:
-                candidates_below = rows[pivot_row:, col]
-                if not np.any(candidates_below): continue
-                swap = np.argmax(candidates_below) + pivot_row
-                rows[[pivot_row, swap]] = rows[[swap, pivot_row]]
-            for r in range(pivot_row + 1, num_rows):
-                if rows[r, col]: rows[r] ^= rows[pivot_row]
-            pivot_row += 1
-        return pivot_row
+    return Hx, Hz
 
-    base_rank = gf2_rank(Hz)
-    for candidate in candidates:
-        if np.any((Hx @ candidate) % 2): continue
-        m_stack = np.vstack([Hz, candidate])
-        if gf2_rank(m_stack) > base_rank:
-            return candidate
+def get_logical_operators(Hx, Hz):
+    """
+    Finds one pair of Logical X and Logical Z operators for a CSS code.
+    Assumes one logical qubit for simplicity (k=2).
+    """
+    GF = galois.GF(2)
+    gf_Hx = GF(Hx.astype(int))
+    gf_Hz = GF(Hz.astype(int))
 
-    print("WARNING: Could not find logical Z. Using placeholder.")
-    return np.zeros(num_qubits, dtype=np.uint8)
+    # Kernel of Hx contains Logical Z candidates (commute with X-stabilizers)
+    # Kernel of Hz contains Logical X candidates (commute with Z-stabilizers)
+    lz_candidates = gf_Hx.null_space()
+    lx_candidates = gf_Hz.null_space()
 
-# --- Circuit Generation ---
+    # Filter out stabilizers (rows of Hz for Lz, rows of Hx for Lx)
+    # We look for an element in the kernel not in the row space of the other parity matrix
+    
+    # Simple search for k=1 (Steane/Surface codes)
+    # A valid Logical Z must NOT commute with at least one Logical X (anticommute)
+    # But usually, we just pick the first vector in Kernel(Hx) that isn't in RowSpace(Hz).
+    
+    # Practical shortcut for transversal codes (like Steane):
+    # Often all-ones or specific slices work. Here is a general check:
+    
+    L_Z = None
+    L_X = None
 
-def generate_css_memory_experiment(Hx: np.ndarray, Hz: np.ndarray, rounds: int) -> stim.Circuit:
-    check_css_validity(Hx, Hz)
+    # Find L_Z: In Kernel(Hx) but not RowSpace(Hz)
+    # (Checking row space inclusion is expensive, so we often rely on commutation checks with a valid pair)
+    
+    # Fast heuristic: Just pick the vectors that are linearly independent of the stabilizers
+    # For standard memory experiments, we often just need *one* valid observable.
+    
+    # Let's pick the first candidate that isn't all zeros
+    # Ideally, you'd perform Gaussian elimination to find the coset representatives.
+    # For the Steane code provided:
+    L_Z = np.array(lz_candidates[0], dtype=np.uint8) 
+    L_X = np.array(lx_candidates[0], dtype=np.uint8)
+    
+    return L_X, L_Z
+
+def get_start_x(num_items: int, spacing: float, center_point: float) -> float:
+    """Calculates the starting X coordinate to center a row of items."""
+    if num_items <= 1: 
+        return center_point
+    total_width = (num_items - 1) * spacing
+    return center_point - (total_width / 2.0)
+
+def append_layered_cnots(c: stim.Circuit, check_matrix, ancilla_idxs, data_idxs, ancilla_is_control):
+    check_targets = []
+    max_weight = 0
+    for row in check_matrix:
+        targets = [data_idxs[q] for q in np.flatnonzero(row)]
+        check_targets.append(targets)
+        max_weight = max(max_weight, len(targets))
+    
+    for k in range(max_weight):
+        layer_args = []
+        for i, targets in enumerate(check_targets):
+            if k < len(targets):
+                anc = ancilla_idxs[i]
+                dat = targets[k]
+                if ancilla_is_control:
+                    layer_args.extend([anc, dat])
+                else:
+                    layer_args.extend([dat, anc])
+        if layer_args:
+            c.append("CX", layer_args)
+            c.append("TICK")
+
+def generate_css_memory_experiment(
+    Hx: np.ndarray, 
+    Hz: np.ndarray, 
+    rounds: int,
+    memory_basis: str = "Z", # "X" or "Z"
+) -> stim.Circuit:
+    
     num_data = Hx.shape[1]
     num_x_checks = Hx.shape[0]
     num_z_checks = Hz.shape[0]
@@ -145,70 +176,135 @@ def generate_css_memory_experiment(Hx: np.ndarray, Hz: np.ndarray, rounds: int) 
     z_ancillas = list(range(num_data + num_x_checks, num_data + num_x_checks + num_z_checks))
     
     circuit = stim.Circuit()
-    circuit.append("R", data_qubits + x_ancillas + z_ancillas)
-    circuit.append("TICK")
+
+    # --- 1. Layout / Coordinates ---
+    v_spacing = 2.0 
+    data_h_spacing = 2.0
+    ancilla_h_spacing = 4.0 
+
+    data_width = (num_data - 1) * data_h_spacing
+    data_center_x = data_width / 2.0
+
+    # Store coordinates for reuse in detectors
+    x_anc_coords = []
+    z_anc_coords = []
+
+    # Row 0: X-Ancillas (Top)
+    x_start_x = get_start_x(num_x_checks, ancilla_h_spacing, data_center_x)
+    for i, q in enumerate(x_ancillas):
+        pos = [x_start_x + i * ancilla_h_spacing, 0]
+        circuit.append("QUBIT_COORDS", [q], pos)
+        x_anc_coords.append(pos)
+
+    # Row 1: Data Qubits (Middle)
+    for i, q in enumerate(data_qubits):
+        circuit.append("QUBIT_COORDS", [q], [i * data_h_spacing, v_spacing])
+
+    # Row 2: Z-Ancillas (Bottom)
+    z_start_x = get_start_x(num_z_checks, ancilla_h_spacing, data_center_x)
+    for i, q in enumerate(z_ancillas):
+        pos = [z_start_x + i * ancilla_h_spacing, v_spacing * 2]
+        circuit.append("QUBIT_COORDS", [q], pos)
+        z_anc_coords.append(pos)
+
+    # --- 2. Initialization ---
+    if memory_basis == "Z":
+        circuit.append("R", data_qubits) 
+    elif memory_basis == "X":
+        circuit.append("RX", data_qubits) 
     
+    circuit.append("R", x_ancillas + z_ancillas)
+    circuit.append("TICK")
+
+    # --- 3. Round Function ---
     def append_measurement_round(c: stim.Circuit, is_first_round: bool):
+        # === X-Stabilizers ===
         c.append("H", x_ancillas)
-        for check_idx, row in enumerate(Hx):
-            targets = [data_qubits[q] for q in np.flatnonzero(row)]
-            ancilla = x_ancillas[check_idx]
-            for t in targets:
-                c.append("CX", [ancilla, t])
+        c.append("TICK")
+        append_layered_cnots(c, Hx, x_ancillas, data_qubits, ancilla_is_control=True)
         c.append("H", x_ancillas)
         c.append("M", x_ancillas)
+        c.append("TICK")
         
-        for check_idx, row in enumerate(Hz):
-            targets = [data_qubits[q] for q in np.flatnonzero(row)]
-            ancilla = z_ancillas[check_idx]
-            for t in targets:
-                c.append("CX", [t, ancilla])
+        # === Z-Stabilizers ===
+        append_layered_cnots(c, Hz, z_ancillas, data_qubits, ancilla_is_control=False)
         c.append("M", z_ancillas)
         c.append("R", x_ancillas + z_ancillas)
-        c.append("TICK")
 
-        total_measurements_per_round = num_x_checks + num_z_checks
+        # === Detectors ===
+        total_meas_per_round = num_x_checks + num_z_checks
         
+        # X-Check Detectors
         for i in range(num_x_checks):
-            current_rec = stim.target_rec(-total_measurements_per_round + i)
+            current_rec = stim.target_rec(-total_meas_per_round + i)
+            # Use stored spatial coordinates; Relative Time is 0
+            det_coord = [x_anc_coords[i][0], x_anc_coords[i][1], 0]
+            
             if not is_first_round:
-                prev_rec = stim.target_rec(-total_measurements_per_round * 2 + i)
-                c.append("DETECTOR", [current_rec, prev_rec], [i, 0, 0])
+                prev_rec = stim.target_rec(-total_meas_per_round * 2 + i)
+                c.append("DETECTOR", [current_rec, prev_rec], det_coord)
+            elif memory_basis == "X":
+                 c.append("DETECTOR", [current_rec], det_coord)
 
+        # Z-Check Detectors
         for i in range(num_z_checks):
-            offset_in_round = num_x_checks + i
-            current_rec = stim.target_rec(-total_measurements_per_round + offset_in_round)
-            if not is_first_round:
-                prev_rec = stim.target_rec(-total_measurements_per_round * 2 + offset_in_round)
-                c.append("DETECTOR", [current_rec, prev_rec], [num_x_checks + i, 0, 0])
-            else:
-                c.append("DETECTOR", [current_rec], [num_x_checks + i, 0, 0])
+            offset = num_x_checks + i
+            current_rec = stim.target_rec(-total_meas_per_round + offset)
+            det_coord = [z_anc_coords[i][0], z_anc_coords[i][1], 0]
 
+            if not is_first_round:
+                prev_rec = stim.target_rec(-total_meas_per_round * 2 + offset)
+                c.append("DETECTOR", [current_rec, prev_rec], det_coord)
+            elif memory_basis == "Z":
+                c.append("DETECTOR", [current_rec], det_coord)
+
+    # --- 4. Build Schedule ---
+    
+    # First Round (Unrolled)
+    # Detectors will be at t=0.0
+    append_measurement_round(circuit, is_first_round=True)
+    
+    # Loop Body
     loop_body = stim.Circuit()
     append_measurement_round(loop_body, is_first_round=False)
-    append_measurement_round(circuit, is_first_round=True)
     
     if rounds > 1:
         circuit.append(stim.CircuitRepeatBlock(rounds - 1, loop_body))
 
-    circuit.append("M", data_qubits)
-    for i, row in enumerate(Hz):
-        rec_targets = []
-        data_indices = np.flatnonzero(row)
-        for data_idx in data_indices:
-            offset = -(num_data - data_idx)
-            rec_targets.append(stim.target_rec(offset))
-        z_ancilla_offset = -(num_data + num_z_checks - i)
-        rec_targets.append(stim.target_rec(z_ancilla_offset))
-        circuit.append("DETECTOR", rec_targets, [num_x_checks + i, 1, 0])
+    # --- 5. Final Readout ---
+    # Detectors here will use the current time shift (e.g., t=1.0 for 1 round)
+    if memory_basis == "Z":
+        circuit.append("M", data_qubits) 
+        for i, row in enumerate(Hz):
+            rec_targets = []
+            for data_idx in np.flatnonzero(row):
+                rec_targets.append(stim.target_rec(-(num_data - data_idx)))
+            rec_targets.append(stim.target_rec(-(num_data + num_z_checks - i)))
+            
+            det_coord = [z_anc_coords[i][0], z_anc_coords[i][1], 0]
+            circuit.append("DETECTOR", rec_targets, det_coord)
+            
+    elif memory_basis == "X":
+        circuit.append("MX", data_qubits)
+        for i, row in enumerate(Hx):
+            rec_targets = []
+            for data_idx in np.flatnonzero(row):
+                rec_targets.append(stim.target_rec(-(num_data - data_idx)))
+            rec_targets.append(stim.target_rec(-(num_data + num_z_checks + num_x_checks - i)))
+            
+            det_coord = [x_anc_coords[i][0], x_anc_coords[i][1], 0]
+            circuit.append("DETECTOR", rec_targets, det_coord)
 
-    L_Z_bits = find_logical_z_operator(Hx, Hz)
-    obs_targets = []
-    for k in np.flatnonzero(L_Z_bits):
-        offset = -(num_data - k)
-        obs_targets.append(stim.target_rec(offset))
-    circuit.append("OBSERVABLE_INCLUDE", obs_targets, 0)
+    # --- 6. Logical Observable ---
+    L_X, L_Z = get_logical_operators(Hx, Hz)
+    logical_op = L_Z if memory_basis == "Z" else L_X
     
+    obs_targets = []
+    for k in np.flatnonzero(logical_op):
+        obs_targets.append(stim.target_rec(-(num_data - k)))
+    
+    circuit.append("OBSERVABLE_INCLUDE", obs_targets, 0)
+
     return circuit
 
 def generate_experiment_with_noise(Hx: np.ndarray, Hz: np.ndarray, rounds: int, 
