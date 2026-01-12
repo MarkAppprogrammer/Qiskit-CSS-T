@@ -51,14 +51,14 @@ CODE_CONFIGS = {
     "self_dual": {
         "dir": OP1_DIR,
         "dist_dict": OP1_DICT,
-        "if_self_dual": True, # Triggers puncturing logic
-        "default_n_list": [8, 12, 16] # Example defaults
+        "if_self_dual": True,
+        "default_n_list": [8, 18, 24]
     },
     "dual_containing": {
         "dir": OP2_DIR,
         "dist_dict": OP2_DICT,
-        "if_self_dual": False, # Triggers direct null space logic
-        "default_n_list": [7, 23, 47] # Example defaults
+        "if_self_dual": False,
+        "default_n_list": [7, 17, 23]
     }
 }
 
