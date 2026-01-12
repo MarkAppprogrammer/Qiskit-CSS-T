@@ -146,6 +146,7 @@ def si1000_noise_model(
             result.append(instruction)
 
     return result
+
 def bravyi_noise_model(
         circuit: stim.Circuit,
         error_rate: float

@@ -63,28 +63,26 @@ CODE_CONFIGS = {
 }
 
 # --- Helper Functions ---
-
 def H(n, if_self_dual=False):
     d = length_dist_dict[n]
     F2 = galois.GF(2)
-    alistFilePath = alistDirPath + "n" + str(n) + "_d" + str(d) + ".alist"
+    if n == 17:
+        alistFilePath = alistDirPath + "n" + str(n) + "_d" + str(d) + "_Hz.alist"
+        Hz = F2(readAlist(alistFilePath))
+        alistFilePath = alistDirPath + "n" + str(n) + "_d" + str(d) + "_Hx.alist"
+        Hx = F2(readAlist(alistFilePath))
+    else:
+        alistFilePath = alistDirPath + "n" + str(n) + "_d" + str(d) + alistEnd
+
     GenMat = F2(readAlist(alistFilePath))
     
     if if_self_dual:
         G_punctured = GenMat[:, :-1]  # Puncture the last column
-        # Parity-check matrix of the punctured code
-        H_punctured = G_punctured.null_space() 
+        Hz = Hx = G_punctured.null_space() # Parity-check matrix of the punctured code = generator matrix of the dual of the punctured code
     else:
-        # For GenMat being a dual-containing code, use null-space as parity-check
-        H_punctured = GenMat.null_space() 
+        if n != 17:
+            Hz = Hx = GenMat.null_space()  # For GenMat being a dual-containing code, directly use the null-space of the generator matrix directly as the parity-check matrix
 
-    # --- Construct Hx and Hz ---
-    # For this construction, we use the same matrix for both X and Z checks
-    Hx = H_punctured
-    Hz = H_punctured
-
-    # Convert from Galois Field array to standard Numpy uint8 array
-    # This is crucial for passing them into Stim/Sinter functions
     Hx = np.array(Hx, dtype=np.uint8)
     Hz = np.array(Hz, dtype=np.uint8)
 
@@ -99,33 +97,12 @@ def get_logical_operators(Hx, Hz):
     gf_Hx = GF(Hx.astype(int))
     gf_Hz = GF(Hz.astype(int))
 
-    # Kernel of Hx contains Logical Z candidates (commute with X-stabilizers)
-    # Kernel of Hz contains Logical X candidates (commute with Z-stabilizers)
     lz_candidates = gf_Hx.null_space()
     lx_candidates = gf_Hz.null_space()
 
-    # Filter out stabilizers (rows of Hz for Lz, rows of Hx for Lx)
-    # We look for an element in the kernel not in the row space of the other parity matrix
-    
-    # Simple search for k=1 (Steane/Surface codes)
-    # A valid Logical Z must NOT commute with at least one Logical X (anticommute)
-    # But usually, we just pick the first vector in Kernel(Hx) that isn't in RowSpace(Hz).
-    
-    # Practical shortcut for transversal codes (like Steane):
-    # Often all-ones or specific slices work. Here is a general check:
-    
     L_Z = None
     L_X = None
 
-    # Find L_Z: In Kernel(Hx) but not RowSpace(Hz)
-    # (Checking row space inclusion is expensive, so we often rely on commutation checks with a valid pair)
-    
-    # Fast heuristic: Just pick the vectors that are linearly independent of the stabilizers
-    # For standard memory experiments, we often just need *one* valid observable.
-    
-    # Let's pick the first candidate that isn't all zeros
-    # Ideally, you'd perform Gaussian elimination to find the coset representatives.
-    # For the Steane code provided:
     L_Z = np.array(lz_candidates[0], dtype=np.uint8) 
     L_X = np.array(lx_candidates[0], dtype=np.uint8)
     
@@ -307,35 +284,46 @@ def generate_css_memory_experiment(
 
     return circuit
 
-def generate_experiment_with_noise(Hx: np.ndarray, Hz: np.ndarray, rounds: int, 
-                                   noise_model_name: str, noise_params: Dict[str, float]) -> stim.Circuit:
+def generate_experiment_with_noise(
+    Hx: np.ndarray, 
+    Hz: np.ndarray, 
+    rounds: int, 
+    noise_model_name: str,
+    noise_params: dict,
+    memory_basis: str = "Z"
+) -> stim.Circuit:
+    # 1. Generate clean circuit
+    clean_circuit = generate_css_memory_experiment(Hx, Hz, rounds, memory_basis=memory_basis)
     
-    clean_circuit = generate_css_memory_experiment(Hx, Hz, rounds)
+    # 2. Identify data qubits
     num_data = Hx.shape[1]
-    num_check = Hx.shape[0] + Hz.shape[0]
     data_qubits = list(range(num_data))
-    all_qubits = list(range(num_data + num_check))
-    
-    base_p = noise_params.get('p', 0.001) if noise_params else 0.001
+
+    # 3. Apply Noise Model
+    base_p = noise_params['p']
 
     if noise_model_name == "depolarizing":
         return standard_depolarizing_noise_model(
             circuit=clean_circuit,
             data_qubits=data_qubits,
-            after_clifford_depolarization=base_p,
-            after_reset_flip_probability=base_p,
-            before_measure_flip_probability=base_p,
-            before_round_data_depolarization=base_p
+            after_clifford_depolarization=noise_params.get('p_clifford', base_p),
+            after_reset_flip_probability=noise_params.get('p_reset', base_p),
+            before_measure_flip_probability=noise_params.get('p_meas', base_p),
+            before_round_data_depolarization=noise_params.get('p_data_round', base_p)
         )
+        
     elif noise_model_name == "si1000":
         return si1000_noise_model(
-            circuit=clean_circuit, 
-            data_qubits=data_qubits, 
-            all_qubits=all_qubits,
+            circuit=clean_circuit,
+            data_qubits=data_qubits,
             probability=base_p
         )
+        
     elif noise_model_name == "bravyi":
-        return bravyi_noise_model(circuit=clean_circuit, error_rate=base_p)
+        return bravyi_noise_model(
+            circuit=clean_circuit,
+            error_rate=base_p
+        )
     else:
         raise ValueError(f"Unknown noise model: {noise_model_name}")
 
