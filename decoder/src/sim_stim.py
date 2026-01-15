@@ -1,5 +1,6 @@
 import sys
 import os
+import glob
 import tempfile
 import argparse
 import numpy as np
@@ -7,6 +8,7 @@ import pandas as pd
 import galois
 import stim
 import sinter
+import traceback
 from typing import List, Tuple, Dict
 
 # --- Setup Paths ---
@@ -360,21 +362,21 @@ def main():
     target_models = ["depolarizing"]
     
     output_base, output_ext = os.path.splitext(args.output)
+    all_results_df = pd.DataFrame()
 
     for model_name in target_models:
         print(f"\n{'='*60}")
         print(f"Running simulation for model: {model_name} | Code Type: {args.code_type}")
         print(f"{'='*60}")
-
-        tasks = []
         for n in n_list:
+            trace_path = None
             try:
-                # Use the new helper function with config passed in
                 Hx, Hz = get_parity_matrices(n, selected_config)
                 d = selected_config['dist_dict'][n]
                 num_rounds = d * 3 
 
                 print(f"Generating tasks for n={n}, d={d}...")
+                tasks = []
 
                 for p in noise_values:
                     circuit = generate_experiment_with_noise(
@@ -394,43 +396,49 @@ def main():
                             }
                         )
                     )
+            
+                if not tasks:
+                    print(f"No tasks generated for n={n}. Skipping.")
+                    continue
+
+                # Use a fresh temporary file for this specific 'n' batch
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as tmp:
+                    trace_path = tmp.name
+                
+                print(f"Initializing Decoder with trace file: {trace_path}")
+                # Ensure cluster_node_limit matches your local installation's limits
+                mwpf_decoder = SinterMWPFDecoder(cluster_node_limit=15, trace_filename=trace_path)
+
+                print(f"Starting collection on {args.workers} workers...")
+                collected_stats = sinter.collect(
+                    num_workers=args.workers,
+                    tasks=tasks,
+                    custom_decoders={"mwpf": mwpf_decoder},
+                    max_shots=args.max_shots,
+                    print_progress=True,
+                )
+
+                # Process stats for THIS 'n' only
+                batch_df = parse_and_average_stats(collected_stats, trace_path, model_name)
+                all_results_df = pd.concat([all_results_df, batch_df], ignore_index=True)
+
             except Exception as e:
-                print(f"Skipping n={n}: {e}")
-                import traceback
+                print(f"Error processing n={n}: {e}")
                 traceback.print_exc()
 
-        if not tasks:
-            print(f"No tasks generated for {model_name}. Skipping.")
-            continue
+            finally:
+                # SinterMWPFDecoder creates files like trace_path.PID
+                if trace_path:
+                    for f in glob.glob(f"{trace_path}*"):
+                        try:
+                            os.remove(f)
+                        except OSError:
+                            pass
 
-        # Use a fresh temporary file for each model's trace
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as tmp:
-            trace_path = tmp.name
-        
-        try:
-            print(f"Initializing Decoder with trace file: {trace_path}")
-            # Ensure cluster_node_limit matches your local installation's limits
-            mwpf_decoder = SinterMWPFDecoder(cluster_node_limit=15, trace_filename=trace_path)
-
-            print(f"Starting collection on {args.workers} workers...")
-            collected_stats = sinter.collect(
-                num_workers=args.workers,
-                tasks=tasks,
-                custom_decoders={"mwpf": mwpf_decoder},
-                max_shots=args.max_shots,
-                print_progress=True,
-            )
-
-            # Pass model_name here to fix the argument mismatch
-            final_df = parse_and_average_stats(collected_stats, trace_path, model_name)
-            
-            output_filename = f"{output_base}_{model_name}{output_ext}"
-            final_df.to_csv(output_filename, index=False)
-            print(f"Results for {model_name} saved to {output_filename}")
-
-        finally:
-            if os.path.exists(trace_path):
-                os.remove(trace_path)
+    # Save aggregated results
+    output_filename = f"{output_base}_{args.code_type}{output_ext}"
+    all_results_df.to_csv(output_filename, index=False)
+    print(f"Final results saved to {output_filename}")
 
 if __name__ == "__main__":
     main()
