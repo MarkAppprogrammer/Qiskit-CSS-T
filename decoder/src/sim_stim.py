@@ -344,7 +344,7 @@ def parse_and_average_stats(stats: List[sinter.TaskStats], trace_file: str, mode
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--workers", type=int, default=os.cpu_count())
-    parser.add_argument("--max_shots", type=int, default=100_000)
+    parser.add_argument("--max_shots", type=int, default=10_000)
     parser.add_argument("--output", type=str, default="results.csv")
     parser.add_argument("--code_type", type=str, choices=["self_dual", "dual_containing"], required=True,
                         help="Choose 'self_dual' (Option 1) or 'dual_containing' (Option 2)")
