@@ -40,10 +40,10 @@ OP2_DICT = {7:3, 17:5, 23:7, 47:11, 79:15, 103:19, 167:23}
 
 CODE_CONFIGS = {
     "self_dual": {
-        "dir": OP1_DIR, "dist_dict": OP1_DICT, "if_self_dual": True, "default_n_list": [8, 18, 24], "alist_suffix": ".alist"
+        "dir": OP1_DIR, "dist_dict": OP1_DICT, "if_self_dual": True, "default_n_list": [8, 18, 24, 48], "alist_suffix": ".alist"
     },
     "dual_containing": {
-        "dir": OP2_DIR, "dist_dict": OP2_DICT, "if_self_dual": False, "default_n_list": [7, 17, 23], "alist_suffix": ".alist"
+        "dir": OP2_DIR, "dist_dict": OP2_DICT, "if_self_dual": False, "default_n_list": [7, 17, 23, 47], "alist_suffix": ".alist"
     }
 }
 
@@ -192,7 +192,7 @@ def main():
     
     selected_config = CODE_CONFIGS[args.code_type]
     n_list = selected_config["default_n_list"]
-    noise_values = [0.008, 0.009, 0.01, 0.011, 0.012]
+    noise_values = np.logspace(-4, -2, 10).tolist()
     models_to_run = ["depolarizing", "si1000"]
     output_base, output_ext = os.path.splitext(args.output)
 
@@ -217,7 +217,7 @@ def main():
             trace_path = tmp.name
             
         try:
-            mwpf_decoder = SinterMWPFDecoder(cluster_node_limit=200, trace_filename=trace_path)
+            mwpf_decoder = SinterMWPFDecoder(cluster_node_limit=50, trace_filename=trace_path)
             
             collected_stats = sinter.collect(
                 num_workers=args.workers, tasks=my_tasks, custom_decoders={"mwpf": mwpf_decoder},

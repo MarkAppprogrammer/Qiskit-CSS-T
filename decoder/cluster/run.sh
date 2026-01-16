@@ -10,6 +10,7 @@
 # --- CONFIGURATION ---
 readonly BASE_DIR="$HOME/work/Qiskit-CSS-T/decoder"
 readonly DATA_ROOT="$BASE_DIR/data"
+readonly ENV_DIR="$BASE_DIR/env"
 
 readonly SRC_PYTHON_SCRIPT="$BASE_DIR/src/mpi_stim.py"
 readonly SRC_DEP_NOISE="$BASE_DIR/src/noise_models.py"
@@ -29,6 +30,7 @@ submission_preflight_checks() {
     log_info "Running pre-flight checks..."
     [[ -f "$SRC_PYTHON_SCRIPT" ]] || log_error "Python script missing: $SRC_PYTHON_SCRIPT"
     [[ -d "$SRC_ALIST_ROOT" ]] || log_error "Alist directory missing: $SRC_ALIST_ROOT"
+    [[ -d "$ENV_DIR" ]] || log_error "Environment missing: $ENV_DIR"
 }
 
 create_version_directory() {
@@ -40,12 +42,19 @@ create_version_directory() {
     VERSION_DIR="$DATA_ROOT/$new_version_num"
     mkdir -p "$VERSION_DIR/logs/"
 
+    # Copy Scripts
     cp "$SRC_PYTHON_SCRIPT" "$VERSION_DIR/$PYTHON_FILENAME"
     cp "$SRC_DEP_NOISE" "$VERSION_DIR/$NOISE_FILENAME"
     cp "$SRC_DEP_CIRCUIT" "$VERSION_DIR/$CIRCUIT_FILENAME"
     cp "$SRC_DEP_CONVERT" "$VERSION_DIR/$CONVERT_FILENAME" || log_info "Warning: convert_alist.py not found"
     cp "$0" "$VERSION_DIR/run.sh"
+    
+    # Copy Assets
     cp -r "$SRC_ALIST_ROOT" "$VERSION_DIR/alistMats"
+    
+    # Copy Environment (Frozen for reproducibility)
+    log_info "Freezing python environment (this may take a moment)..."
+    cp -r "$ENV_DIR" "$VERSION_DIR/env"
 
     log_info "Created version: $VERSION_DIR"
 }
@@ -68,8 +77,12 @@ run_compute_logic() {
     module purge
     module load gnu12/12.2.0 openmpi4/4.1.5 python/3.10.19
 
-    if [[ -f "$BASE_DIR/.env/bin/activate" ]]; then
-        source "$BASE_DIR/.env/bin/activate"
+    # Source the LOCAL FROZEN environment
+    if [[ -f "./env/bin/activate" ]]; then
+        echo "Activating local frozen environment..."
+        source "./env/bin/activate"
+    else
+        log_error "Could not find local environment at ./env/bin/activate"
     fi
 
     echo "--- Starting Sinter Simulation ---"
@@ -77,30 +90,36 @@ run_compute_logic() {
     # 1. RUN PARALLEL
     BASE_OUTPUT="results_v${SLURM_JOB_ID}_dual.csv"
     
+    # Note: srun blocks by default, so 'wait' isn't strictly necessary but good practice
     srun python "$PYTHON_FILENAME" \
         --workers "$SLURM_CPUS_PER_TASK" \
         --output "$BASE_OUTPUT" \
         --code_type "dual_containing"
-
-    wait 
 
     # 2. MERGE RESULTS
     echo "--- Merging CSVs ---"
     
     BASE_NAME_NO_EXT="${BASE_OUTPUT%.csv}"
 
+    # Robust merge for all models found in output files
+    # We look for files matching the pattern and extract unique model names if possible,
+    # or just rely on the hardcoded list.
     for model in "depolarizing" "si1000"; do
         FINAL_MERGED="${BASE_NAME_NO_EXT}_${model}.csv"
         
+        # Find the first available rank file to grab the header
         FIRST_FILE=$(ls ${BASE_NAME_NO_EXT}_${model}_rank*.csv 2>/dev/null | head -n 1)
         
         if [[ -n "$FIRST_FILE" ]]; then
             head -n 1 "$FIRST_FILE" > "$FINAL_MERGED"
+            # Append content of all ranks, skipping headers
             for f in ${BASE_NAME_NO_EXT}_${model}_rank*.csv; do
                 tail -n +2 "$f" >> "$FINAL_MERGED"
                 rm "$f"
             done
             echo "✅ Merged $model data into $FINAL_MERGED"
+        else
+            echo "⚠️ No output files found for model: $model"
         fi
     done
 
