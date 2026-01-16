@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=Stim_MWPF
 #SBATCH --partition=normal
-#SBATCH --nodes=3
+#SBATCH --nodes=16
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
 #SBATCH --output=logs/slurm_%j.out
@@ -10,7 +10,7 @@
 # --- CONFIGURATION ---
 readonly BASE_DIR="$HOME/work/Qiskit-CSS-T/decoder"
 readonly DATA_ROOT="$BASE_DIR/data"
-readonly ENV_DIR="$BASE_DIR/env"
+readonly ENV_DIR="$BASE_DIR/.env"  # Path to your python venv
 
 readonly SRC_PYTHON_SCRIPT="$BASE_DIR/src/mpi_stim.py"
 readonly SRC_DEP_NOISE="$BASE_DIR/src/noise_models.py"
@@ -54,7 +54,7 @@ create_version_directory() {
     
     # Copy Environment (Frozen for reproducibility)
     log_info "Freezing python environment (this may take a moment)..."
-    cp -r "$ENV_DIR" "$VERSION_DIR/env"
+    cp -r "$ENV_DIR" "$VERSION_DIR/.env"
 
     log_info "Created version: $VERSION_DIR"
 }
@@ -78,11 +78,11 @@ run_compute_logic() {
     module load gnu12/12.2.0 openmpi4/4.1.5 python/3.10.19
 
     # Source the LOCAL FROZEN environment
-    if [[ -f "./env/bin/activate" ]]; then
+    if [[ -f "./.env/bin/activate" ]]; then
         echo "Activating local frozen environment..."
-        source "./env/bin/activate"
+        source "./.env/bin/activate"
     else
-        log_error "Could not find local environment at ./env/bin/activate"
+        log_error "Could not find local environment at ./.env/bin/activate"
     fi
 
     echo "--- Starting Sinter Simulation ---"
