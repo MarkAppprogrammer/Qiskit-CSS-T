@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=Stim_MWPF
 #SBATCH --partition=normal
-#SBATCH --nodes=16
+#SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
 #SBATCH --output=logs/slurm_%j.out
@@ -10,11 +10,12 @@
 # --- CONFIGURATION ---
 readonly BASE_DIR="$HOME/work/Qiskit-CSS-T/decoder"
 readonly DATA_ROOT="$BASE_DIR/data"
-readonly ENV_DIR="$BASE_DIR/.env"  # Path to your python venv
+readonly ENV_DIR="$BASE_DIR/.env"
 
 readonly SRC_PYTHON_SCRIPT="$BASE_DIR/src/mpi_stim.py"
 readonly SRC_DEP_NOISE="$BASE_DIR/src/noise_models.py"
 readonly SRC_DEP_CIRCUIT="$BASE_DIR/src/circuit.py"
+readonly SRC_DEP_DECODER="$BASE_DIR/src/sinter_decoders.py"
 readonly SRC_DEP_CONVERT="$BASE_DIR/../doubling-CSST/convert_alist.py"
 readonly SRC_ALIST_ROOT="$BASE_DIR/../doubling-CSST/alistMats"
 
@@ -22,6 +23,7 @@ readonly PYTHON_FILENAME="mpi_stim.py"
 readonly NOISE_FILENAME="noise_models.py"
 readonly CIRCUIT_FILENAME="circuit.py"      
 readonly CONVERT_FILENAME="convert_alist.py"
+readonly DECODER_FILENAME="sinter_decoders.py"
 
 log_info() { printf "✅ %s\n" "$1"; }
 log_error() { printf "❌ Error: %s\n" "$1" >&2; exit 1; }
@@ -46,6 +48,7 @@ create_version_directory() {
     cp "$SRC_PYTHON_SCRIPT" "$VERSION_DIR/$PYTHON_FILENAME"
     cp "$SRC_DEP_NOISE" "$VERSION_DIR/$NOISE_FILENAME"
     cp "$SRC_DEP_CIRCUIT" "$VERSION_DIR/$CIRCUIT_FILENAME"
+    cp "$SRC_DEP_DECODER" "$VERSION_DIR/$DECODER_FILENAME"
     cp "$SRC_DEP_CONVERT" "$VERSION_DIR/$CONVERT_FILENAME" || log_info "Warning: convert_alist.py not found"
     cp "$0" "$VERSION_DIR/run.sh"
     
@@ -77,6 +80,17 @@ run_compute_logic() {
     module purge
     module load gnu12/12.2.0 openmpi4/4.1.5 python/3.10.19
 
+    # --- CRITICAL: THREADING & MEMORY CONTROL ---
+    export OMP_NUM_THREADS=1
+    export MKL_NUM_THREADS=1
+    export OPENBLAS_NUM_THREADS=1
+    export VECLIB_MAXIMUM_THREADS=1
+    export NUMEXPR_NUM_THREADS=1
+    export NUMBA_NUM_THREADS=1 
+
+    # --- ATTEMPT CLEANUP ---
+    rm -f /dev/shm/sem.* 2>/dev/null || true
+
     # Source the LOCAL FROZEN environment
     if [[ -f "./.env/bin/activate" ]]; then
         echo "Activating local frozen environment..."
@@ -88,11 +102,15 @@ run_compute_logic() {
     echo "--- Starting Sinter Simulation ---"
     
     # 1. RUN PARALLEL
+    WORKERS=$((SLURM_CPUS_PER_TASK - 4))
+    if [ "$WORKERS" -lt 1 ]; then WORKERS=1; fi
+    
     BASE_OUTPUT="results_v${SLURM_JOB_ID}_dual.csv"
     
-    # Note: srun blocks by default, so 'wait' isn't strictly necessary but good practice
+    echo "Running with $WORKERS workers per node..."
+
     srun python "$PYTHON_FILENAME" \
-        --workers "$SLURM_CPUS_PER_TASK" \
+        --workers "$WORKERS" \
         --output "$BASE_OUTPUT" \
         --code_type "dual_containing"
 
@@ -101,18 +119,12 @@ run_compute_logic() {
     
     BASE_NAME_NO_EXT="${BASE_OUTPUT%.csv}"
 
-    # Robust merge for all models found in output files
-    # We look for files matching the pattern and extract unique model names if possible,
-    # or just rely on the hardcoded list.
     for model in "depolarizing" "si1000"; do
         FINAL_MERGED="${BASE_NAME_NO_EXT}_${model}.csv"
-        
-        # Find the first available rank file to grab the header
         FIRST_FILE=$(ls ${BASE_NAME_NO_EXT}_${model}_rank*.csv 2>/dev/null | head -n 1)
         
         if [[ -n "$FIRST_FILE" ]]; then
             head -n 1 "$FIRST_FILE" > "$FINAL_MERGED"
-            # Append content of all ranks, skipping headers
             for f in ${BASE_NAME_NO_EXT}_${model}_rank*.csv; do
                 tail -n +2 "$f" >> "$FINAL_MERGED"
                 rm "$f"
