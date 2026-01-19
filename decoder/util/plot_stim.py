@@ -4,113 +4,189 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy.stats
 import argparse
+import json
+import glob
+import time
 
-length_dist_dict = {7:3, 17:5, 23:7, 47:11, 79:15, 103:19, 167:23}
+# --- Configuration ---
+FALLBACK_D_MAP = {
+    # Self Dual
+    4:2, 6:2, 8:2, 10:2, 12:4, 14:4, 16:4, 18:4, 20:4, 22:6, 24:6, 26:6, 28:6, 30:6, 32:8,
+    # Dual Containing
+    7:3, 17:5, 23:7, 47:11, 79:15, 103:19, 167:23
+}
 
-def calc_ci_for_df(k, n, alpha):
-    """Calculate Clopper-Pearson confidence intervals for error bars."""
+def calc_ci(k, n, alpha=0.05):
+    """Clopper-Pearson confidence intervals (Vectorized for Series)."""
+    k = np.array(k)
+    n = np.array(n)
+    
+    # Calculate lower bound
     lower = scipy.stats.beta.ppf(alpha / 2, k, n - k + 1)
     lower = np.nan_to_num(lower, nan=0.0)
+    
+    # Calculate upper bound
     upper = scipy.stats.beta.ppf(1 - alpha / 2, k + 1, n - k)
     upper = np.nan_to_num(upper, nan=1.0)
-    p_hat = k / n
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        p_hat = np.divide(k, n, out=np.zeros_like(k, dtype=float), where=n!=0)
+        
     return p_hat - lower, upper - p_hat
 
-def plot_from_csv(csv_filepath, alpha_val=0.05):
-    if not os.path.exists(csv_filepath):
-        print(f"Error: File '{csv_filepath}' not found.")
-        return
+def load_and_merge_files(files_list):
+    """Reads a list of CSV files and returns one combined DataFrame."""
+    if not files_list:
+        print("No files provided.")
+        return pd.DataFrame()
 
-    df = pd.read_csv(csv_filepath)
-
-    # Extract noise model name for the title
-    if 'noise_model' in df.columns:
-        # Assuming the file contains one type of noise model, take the first one
-        noise_model_name = df['noise_model'].iloc[0]
-    else:
-        noise_model_name = "Unknown"
-
-    ns = sorted(df['n'].unique())
-    ps = sorted(df['p'].unique())
-    confidence_percent = int((1 - alpha_val) * 100)
-
-    # Styling
-    plt.rcParams.update({'font.size': 14, 'axes.titlesize': 18, 'axes.labelsize': 16})
-    fig = plt.figure(figsize=(18, 12))
-    gs = fig.add_gridspec(2, 2, height_ratios=[3, 2])
+    print(f"Found {len(files_list)} files. Loading...")
+    t0 = time.time()
     
-    ax_total = fig.add_subplot(gs[0, :])
-    ax_obj = fig.add_subplot(gs[1, 0])
-    ax_time = fig.add_subplot(gs[1, 1])
-    
-    ler_axes = [ax_total]
-    plot_configs = [
-        {'key': 'total_logical_error_rate', 'title': 'Total Logical Error'},
-    ]
+    dfs = []
+    for f in files_list:
+        if not os.path.exists(f):
+            print(f"Skipping missing file: {f}")
+            continue
+        try:
+            # Low_memory=False is faster for large chunks but uses more RAM
+            df = pd.read_csv(f, skipinitialspace=True, low_memory=False)
+            dfs.append(df)
+        except Exception as e:
+            print(f"Warning: Could not read {f}: {e}")
 
-    for i, config in enumerate(plot_configs):
-        ax = ler_axes[i]
-        key = config['key']
+    if not dfs:
+        return pd.DataFrame()
+
+    full_df = pd.concat(dfs, ignore_index=True)
+    
+    # Cleaning: Remove repeated headers
+    if 'shots' in full_df.columns:
+        full_df = full_df[full_df['shots'].astype(str) != 'shots']
+
+    print(f"Merged into {len(full_df)} rows in {time.time()-t0:.2f}s.")
+    return full_df
+
+def process_data(df):
+    """Parses metadata and aggregates stats."""
+    if df.empty: return df
+
+    # 1. Parse JSON Metadata (OPTIMIZED)
+    if 'json_metadata' in df.columns:
+        print("Parsing JSON metadata (Optimized)...")
+        t0 = time.time()
         
+        # Convert column to list of strings first (faster iteration)
+        json_strings = df['json_metadata'].fillna('{}').astype(str).tolist()
+        
+        # Fast parsing using list comprehension
+        try:
+            parsed_data = [json.loads(s) for s in json_strings]
+            meta_df = pd.DataFrame(parsed_data)
+            
+            # Drop original and concat
+            df = df.drop(columns=['json_metadata'], errors='ignore')
+            df = pd.concat([df.reset_index(drop=True), meta_df.reset_index(drop=True)], axis=1)
+            print(f"JSON parsed in {time.time()-t0:.2f}s.")
+            
+        except Exception as e:
+            print(f"Error parsing JSON: {e}")
+            return pd.DataFrame()
+
+    # 2. Ensure Numeric Types
+    print("Converting numeric types...")
+    cols_to_numeric = ['shots', 'errors', 'seconds', 'n', 'p', 'd']
+    for c in cols_to_numeric:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+
+    # 3. Drop invalid rows
+    df = df.dropna(subset=['n', 'p', 'shots'])
+
+    # 4. Aggregate
+    group_cols = [c for c in ['n', 'p', 'd', 'noise_model', 'code_type'] if c in df.columns]
+    
+    if not group_cols:
+        print("Error: No grouping columns (n, p) found.")
+        return pd.DataFrame()
+
+    print(f"Aggregating {len(df)} rows by {group_cols}...")
+    agg_df = df.groupby(group_cols, as_index=False)[['shots', 'errors', 'seconds']].sum()
+
+    # 5. Calculate Rates
+    agg_df['total_logical_error_rate'] = agg_df['errors'] / agg_df['shots']
+    agg_df['average_cpu_time_seconds'] = agg_df['seconds'] / agg_df['shots']
+
+    print(f"Final condensed dataset has {len(agg_df)} points.")
+    return agg_df
+
+def plot_results(df, output_base):
+    if df.empty: return
+
+    noise_models = df['noise_model'].unique() if 'noise_model' in df.columns else ['Unknown']
+
+    for model in noise_models:
+        subset_model = df if len(noise_models) == 1 else df[df['noise_model'] == model]
+        
+        ns = sorted(subset_model['n'].unique())
+        ps = sorted(subset_model['p'].unique())
+
+        fig, (ax_ler, ax_time) = plt.subplots(1, 2, figsize=(16, 6))
+
+        # --- LER Plot ---
         for n in ns:
-            subset = df[df['n'] == n].sort_values('p')
-            if subset.empty or key not in subset.columns: continue
+            data = subset_model[subset_model['n'] == n].sort_values('p')
             
-            d = length_dist_dict.get(n, '?')
-            
-            # Calculate error bars using the 'shots' column from the CSV
-            if 'errors' in subset.columns and 'shots' in subset.columns:
-                err_low, err_high = calc_ci_for_df(subset[key]*subset['shots'], subset['shots'], alpha_val)
-                y_err = [err_low, err_high]
+            if 'd' in data.columns:
+                d = int(data['d'].iloc[0])
             else:
-                y_err = None
+                d = FALLBACK_D_MAP.get(int(n), '?')
 
-            ax.errorbar(subset['p'], subset[key], yerr=y_err, marker='o', label=f'n={n}, d={d}', capsize=3)
+            low, high = calc_ci(data['errors'], data['shots'])
+            yerr = [low, high]
 
-        ax.plot(ps, ps, linestyle='--', color='black', alpha=0.3, label="Break-even")
-        ax.set_xscale('log'); ax.set_yscale('log')
-        ax.set_title(config['title'])
-        ax.grid(True, which="both", ls="--", alpha=0.4)
-        if i == 0: ax.set_ylabel(f'LER ({confidence_percent}% CI)')
+            ax_ler.errorbar(data['p'], data['total_logical_error_rate'], yerr=yerr,
+                            marker='o', capsize=3, label=f'n={n}, d={d}')
 
-    # --- Mean Objective ---
-    if 'mean_objective_value' in df.columns:
+        ax_ler.plot(ps, ps, 'k--', alpha=0.3, label="Break-even")
+        ax_ler.set_xscale('log'); ax_ler.set_yscale('log')
+        ax_ler.set_xlabel('Physical Error Rate (p)')
+        ax_ler.set_ylabel('Logical Error Rate (LER)')
+        ax_ler.set_title(f'Logical Error Rate ({model})')
+        ax_ler.grid(True, which="both", ls="--", alpha=0.4)
+        ax_ler.legend()
+
+        # --- CPU Time Plot ---
         for n in ns:
-            subset = df[df['n'] == n].sort_values('p')
-            ax_obj.plot(subset['p'], subset['mean_objective_value'], marker='s', linestyle=':', label=f'n={n}')
-        ax_obj.set_xscale('log')
-        ax_obj.set_title('Mean Objective Value')
-        ax_obj.set_ylabel('Weight')
-        ax_obj.grid(True, which="both", ls="--", alpha=0.4)
-
-    # --- CPU Time ---
-    if 'average_cpu_time_seconds' in df.columns:
-        for n in ns:
-            subset = df[df['n'] == n].sort_values('p')
-            ax_time.plot(subset['p'], subset['average_cpu_time_seconds'], marker='^', linestyle='-.')
+            data = subset_model[subset_model['n'] == n].sort_values('p')
+            ax_time.plot(data['p'], data['average_cpu_time_seconds'], marker='^', linestyle='-.', label=f'n={n}')
+        
         ax_time.set_xscale('log'); ax_time.set_yscale('log')
-        ax_time.set_title('Avg Computation Time')
-        ax_time.set_ylabel('Seconds / Shot')
+        ax_time.set_xlabel('Physical Error Rate (p)')
+        ax_time.set_ylabel('Seconds per Shot')
+        ax_time.set_title('Decoding Time')
         ax_time.grid(True, which="both", ls="--", alpha=0.4)
+        ax_time.legend()
 
-    # Legend and Title
-    fig.legend(*ax_total.get_legend_handles_labels(), loc='center right', bbox_to_anchor=(1.1, 0.5))
-    
-    # Dynamic title using extracted noise model name
-    fig.suptitle(f'Hyperion Decoder Performance for {noise_model_name} Noise Model', fontsize=22)
-    
-    plt.tight_layout(rect=[0, 0, 0.9, 0.95])
-    
-    # Save the plot to a file
-    output_filename = os.path.splitext(csv_filepath)[0] + ".png"
-    plt.savefig(output_filename, bbox_inches='tight')
-    print(f"Plot saved to {output_filename}")
+        plt.tight_layout()
+        fname = f"{output_base}_{model}.png"
+        plt.savefig(fname)
+        print(f"Plot saved to {fname}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Plot simulation results from CSV.")
-    parser.add_argument("csv_file", type=str, help="Path to the results CSV file")
-    parser.add_argument("--alpha", type=float, default=0.05, help="Alpha value for confidence intervals (default: 0.05)")
+    parser = argparse.ArgumentParser(description="Plot merged Sinter shards.")
+    parser.add_argument("files", nargs='+', help="List of CSV files")
+    parser.add_argument("--out", default="plot", help="Output filename base")
     
     args = parser.parse_args()
     
-    plot_from_csv(args.csv_file, args.alpha)
+    final_file_list = []
+    for f in args.files:
+        if any(char in f for char in ['*', '?', '[']):
+            final_file_list.extend(glob.glob(f))
+        else:
+            final_file_list.append(f)
+
+    raw_df = load_and_merge_files(final_file_list)
+    clean_df = process_data(raw_df)
+    plot_results(clean_df, args.out)

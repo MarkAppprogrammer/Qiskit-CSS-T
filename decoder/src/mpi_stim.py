@@ -40,10 +40,10 @@ OP2_DICT = {7:3, 17:5, 23:7, 47:11, 79:15, 103:19, 167:23}
 
 CODE_CONFIGS = {
     "self_dual": {
-        "dir": OP1_DIR, "dist_dict": OP1_DICT, "if_self_dual": True, "default_n_list": [8, 18, 24], "alist_suffix": ".alist"
+        "dir": OP1_DIR, "dist_dict": OP1_DICT, "if_self_dual": True, "default_n_list": [8, 18, 24, 48], "alist_suffix": ".alist"
     },
     "dual_containing": {
-        "dir": OP2_DIR, "dist_dict": OP2_DICT, "if_self_dual": False, "default_n_list": [7, 17, 23], "alist_suffix": ".alist"
+        "dir": OP2_DIR, "dist_dict": OP2_DICT, "if_self_dual": False, "default_n_list": [7, 17, 23, 47], "alist_suffix": ".alist"
     }
 }
 
@@ -146,13 +146,49 @@ def generate_css_memory_experiment(Hx, Hz, rounds, memory_basis="Z"):
     circuit.append("OBSERVABLE_INCLUDE", [stim.target_rec(-(num_data - k)) for k in np.flatnonzero(op)], 0)
     return circuit
 
-def generate_experiment_with_noise(Hx, Hz, rounds, noise_model_name, noise_params, memory_basis="Z"):
-    clean = generate_css_memory_experiment(Hx, Hz, rounds, memory_basis=memory_basis)
-    data = list(range(Hx.shape[1])); p = noise_params['p']
-    if noise_model_name == "depolarizing": return standard_depolarizing_noise_model(clean, data, p)
-    elif noise_model_name == "si1000": return si1000_noise_model(clean, data, probability=p)
-    elif noise_model_name == "bravyi": return bravyi_noise_model(clean, error_rate=p)
-    raise ValueError(f"Unknown noise: {noise_model_name}")
+def generate_experiment_with_noise(
+    Hx: np.ndarray, 
+    Hz: np.ndarray, 
+    rounds: int, 
+    noise_model_name: str,
+    noise_params: dict,
+    memory_basis: str = "Z"
+) -> stim.Circuit:
+    # 1. Generate clean circuit
+    clean_circuit = generate_css_memory_experiment(Hx, Hz, rounds, memory_basis=memory_basis)
+    
+    # 2. Identify data qubits
+    num_data = Hx.shape[1]
+    data_qubits = list(range(num_data))
+
+    # 3. Apply Noise Model
+    base_p = noise_params['p']
+
+    if noise_model_name == "depolarizing":
+        return standard_depolarizing_noise_model(
+            circuit=clean_circuit,
+            data_qubits=data_qubits,
+            after_clifford_depolarization=noise_params.get('p_clifford', base_p),
+            after_reset_flip_probability=noise_params.get('p_reset', base_p),
+            before_measure_flip_probability=noise_params.get('p_meas', base_p),
+            before_round_data_depolarization=noise_params.get('p_data_round', base_p)
+        )
+        
+    elif noise_model_name == "si1000":
+        return si1000_noise_model(
+            circuit=clean_circuit,
+            data_qubits=data_qubits,
+            probability=base_p
+        )
+        
+    elif noise_model_name == "bravyi":
+        return bravyi_noise_model(
+            circuit=clean_circuit,
+            error_rate=base_p
+        )
+    else:
+        raise ValueError(f"Unknown noise model: {noise_model_name}")
+
 
 def parse_and_average_stats(stats: List[sinter.TaskStats], trace_file: str, model_name: str) -> pd.DataFrame:
     try:
@@ -192,7 +228,7 @@ def main():
     
     selected_config = CODE_CONFIGS[args.code_type]
     n_list = selected_config["default_n_list"]
-    noise_values = [0.008, 0.009, 0.01, 0.011, 0.012]
+    noise_values = np.logspace(-4, -2, 10).tolist()
     models_to_run = ["depolarizing", "si1000"]
     output_base, output_ext = os.path.splitext(args.output)
 
@@ -217,7 +253,7 @@ def main():
             trace_path = tmp.name
             
         try:
-            mwpf_decoder = SinterMWPFDecoder(cluster_node_limit=200, trace_filename=trace_path)
+            mwpf_decoder = SinterMWPFDecoder(cluster_node_limit=50, trace_filename=trace_path)
             
             collected_stats = sinter.collect(
                 num_workers=args.workers, tasks=my_tasks, custom_decoders={"mwpf": mwpf_decoder},
