@@ -247,7 +247,12 @@ def main():
         # Distribute tasks
         my_tasks = [t for i, t in enumerate(all_tasks) if i % world_size == proc_rank]
         if not my_tasks: continue
-        print(f"[Node {proc_rank}] Processing {len(my_tasks)} tasks for {model_name}...")
+        
+        # Calculate print interval to avoid flooding logs (e.g., update 10 times total)
+        total_tasks = len(my_tasks)
+        print_interval = max(1, total_tasks // 10)
+        
+        print(f"[Node {proc_rank}] Processing {total_tasks} tasks for {model_name}...")
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as tmp:
             trace_path = tmp.name
@@ -255,10 +260,24 @@ def main():
         try:
             mwpf_decoder = SinterMWPFDecoder(cluster_node_limit=50, trace_filename=trace_path)
             
-            collected_stats = sinter.collect(
-                num_workers=args.workers, tasks=my_tasks, custom_decoders={"mwpf": mwpf_decoder},
-                max_shots=args.max_shots, print_progress=False
+            collected_stats = []
+            
+            iterator = sinter.iter_collect(
+                num_workers=args.workers, 
+                tasks=my_tasks, 
+                custom_decoders={"mwpf": mwpf_decoder},
+                max_shots=args.max_shots
             )
+            
+            # Manual loop to gather stats and print sparsely
+            for i, stat in enumerate(iterator):
+                collected_stats.append(stat)
+                
+                # Print only at specific intervals or at the very end
+                if (i + 1) % print_interval == 0 or (i + 1) == total_tasks:
+                    print(f"[Node {proc_rank}] {model_name} Progress: {i + 1}/{total_tasks} completed.", flush=True)
+            # ----------------------------------------
+
             final_df = parse_and_average_stats(collected_stats, trace_path, model_name)
             
             part_filename = f"{output_base}_{model_name}_rank{proc_rank}{output_ext}"
@@ -267,7 +286,6 @@ def main():
 
         finally:
             if os.path.exists(trace_path):
-                # CLEANUP: Requires 'glob' to find PID-appended files created by workers
                 for f in glob.glob(f"{trace_path}*"):
                     try: os.remove(f)
                     except OSError: pass

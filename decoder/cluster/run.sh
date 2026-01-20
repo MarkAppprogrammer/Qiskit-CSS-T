@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=Stim_MWPF
 #SBATCH --partition=normal
-#SBATCH --nodes=4
+#SBATCH --nodes=12
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
 #SBATCH --output=logs/slurm_%j.out
@@ -15,7 +15,6 @@ readonly ENV_DIR="$BASE_DIR/.env"
 readonly SRC_PYTHON_SCRIPT="$BASE_DIR/src/mpi_stim.py"
 readonly SRC_DEP_NOISE="$BASE_DIR/src/noise_models.py"
 readonly SRC_DEP_CIRCUIT="$BASE_DIR/src/circuit.py"
-readonly SRC_DEP_DECODER="$BASE_DIR/src/sinter_decoders.py"
 readonly SRC_DEP_CONVERT="$BASE_DIR/../doubling-CSST/convert_alist.py"
 readonly SRC_ALIST_ROOT="$BASE_DIR/../doubling-CSST/alistMats"
 
@@ -23,7 +22,6 @@ readonly PYTHON_FILENAME="mpi_stim.py"
 readonly NOISE_FILENAME="noise_models.py"
 readonly CIRCUIT_FILENAME="circuit.py"      
 readonly CONVERT_FILENAME="convert_alist.py"
-readonly DECODER_FILENAME="sinter_decoders.py"
 
 log_info() { printf "✅ %s\n" "$1"; }
 log_error() { printf "❌ Error: %s\n" "$1" >&2; exit 1; }
@@ -48,7 +46,6 @@ create_version_directory() {
     cp "$SRC_PYTHON_SCRIPT" "$VERSION_DIR/$PYTHON_FILENAME"
     cp "$SRC_DEP_NOISE" "$VERSION_DIR/$NOISE_FILENAME"
     cp "$SRC_DEP_CIRCUIT" "$VERSION_DIR/$CIRCUIT_FILENAME"
-    cp "$SRC_DEP_DECODER" "$VERSION_DIR/$DECODER_FILENAME"
     cp "$SRC_DEP_CONVERT" "$VERSION_DIR/$CONVERT_FILENAME" || log_info "Warning: convert_alist.py not found"
     cp "$0" "$VERSION_DIR/run.sh"
     
