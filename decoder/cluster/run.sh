@@ -96,40 +96,64 @@ run_compute_logic() {
         log_error "Could not find local environment at ./.env/bin/activate"
     fi
 
-    echo "--- Starting Sinter Simulation ---"
-    
-    # 1. RUN PARALLEL
+    # Calculate workers once
     WORKERS=$((SLURM_CPUS_PER_TASK - 4))
     if [ "$WORKERS" -lt 1 ]; then WORKERS=1; fi
-    
-    BASE_OUTPUT="results_v${SLURM_JOB_ID}_dual.csv"
-    
+
+    echo "--- Starting Sinter Simulation ---"
     echo "Running with $WORKERS workers per node..."
 
-    srun python "$PYTHON_FILENAME" \
-        --workers "$WORKERS" \
-        --output "$BASE_OUTPUT" \
-        --code_type "dual_containing"
+    # Create the 'data' directory for temp files (traces)
+    mkdir -p results/
 
-    # 2. MERGE RESULTS
-    echo "--- Merging CSVs ---"
-    
-    BASE_NAME_NO_EXT="${BASE_OUTPUT%.csv}"
-
-    for model in "depolarizing" "si1000"; do
-        FINAL_MERGED="${BASE_NAME_NO_EXT}_${model}.csv"
-        FIRST_FILE=$(ls ${BASE_NAME_NO_EXT}_${model}_rank*.csv 2>/dev/null | head -n 1)
+    # --- LOOP OVER CODE TYPES ---
+    for CODE_TYPE in "self_dual" "dual_containing"; do
         
-        if [[ -n "$FIRST_FILE" ]]; then
-            head -n 1 "$FIRST_FILE" > "$FINAL_MERGED"
-            for f in ${BASE_NAME_NO_EXT}_${model}_rank*.csv; do
-                tail -n +2 "$f" >> "$FINAL_MERGED"
-                rm "$f"
-            done
-            echo "✅ Merged $model data into $FINAL_MERGED"
-        else
-            echo "⚠️ No output files found for model: $model"
-        fi
+        echo "========================================"
+        echo "Processing Code Type: $CODE_TYPE"
+        echo "========================================"
+
+        BASE_OUTPUT="results_v${SLURM_JOB_ID}_${CODE_TYPE}.csv"
+
+        # 1. RUN PARALLEL
+        srun python "$PYTHON_FILENAME" \
+            --workers "$WORKERS" \
+            --output "$BASE_OUTPUT" \
+            --code_type "$CODE_TYPE"
+
+        # 2. MERGE RESULTS
+        echo "--- Merging CSVs for $CODE_TYPE ---"
+        
+        # Strip extension to get base name (e.g. results_v123_self_dual)
+        BASE_NAME_NO_EXT="${BASE_OUTPUT%.csv}"
+
+        for model in "depolarizing" "si1000"; do
+            # Final file goes in CURRENT DIR (ver_dir)
+            FINAL_MERGED="${BASE_NAME_NO_EXT}_${model}.csv"
+            
+            # Look for shards in RESULTS DIR
+            # Pattern: results/results_v123_self_dual_depolarizing_rank*.csv
+            
+            # Find the first available file to grab the header
+            FIRST_FILE=$(ls results/${BASE_NAME_NO_EXT}_${model}_rank*.csv 2>/dev/null | head -n 1)
+            
+            if [[ -n "$FIRST_FILE" ]]; then
+                # Write header to final file in root dir
+                head -n 1 "$FIRST_FILE" > "$FINAL_MERGED"
+                
+                # Append data from all shards in results dir
+                for f in results/${BASE_NAME_NO_EXT}_${model}_rank*.csv; do
+                    tail -n +2 "$f" >> "$FINAL_MERGED"
+                    # Optional: Delete shard after merging to save space
+                    # rm "$f" 
+                done
+                echo "✅ Merged $model data into $FINAL_MERGED"
+            else
+                echo "⚠️ No output files found in results/ for model: $model"
+            fi
+        done
+        echo "Finished $CODE_TYPE"
+        echo ""
     done
 
     echo "--- Job Finished ---"

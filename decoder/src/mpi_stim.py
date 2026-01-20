@@ -219,7 +219,7 @@ def main():
     default_workers = int(slurm_cpus) if slurm_cpus else os.cpu_count()
     parser.add_argument("--workers", type=int, default=default_workers)
     parser.add_argument("--max_shots", type=int, default=1_000_000)
-    parser.add_argument("--output", type=str, default="hyperion_results.csv")
+    parser.add_argument("--output", type=str, default="results.csv")
     parser.add_argument("--code_type", type=str, choices=["self_dual", "dual_containing"], required=True)
     args = parser.parse_args()
 
@@ -230,7 +230,19 @@ def main():
     n_list = selected_config["default_n_list"]
     noise_values = np.logspace(-4, -2, 10).tolist()
     models_to_run = ["depolarizing", "si1000"]
-    output_base, output_ext = os.path.splitext(args.output)
+
+    # --- DIRECTORY SETUP ---
+    ver_dir = os.path.dirname(args.output)
+    if not ver_dir: ver_dir = "."
+
+    results_dir = os.path.join(ver_dir, "results")
+    tmp_dir = os.path.join(ver_dir, "tmp")
+
+    os.makedirs(results_dir, exist_ok=True)
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    base_filename = os.path.splitext(os.path.basename(args.output))[0]
+    output_ext = os.path.splitext(args.output)[1]
 
     for model_name in models_to_run:
         all_tasks = []
@@ -244,24 +256,27 @@ def main():
                         json_metadata={'n': n, 'd': d, 'r': d*3, 'p': p, 'noise_model': model_name, 'code_type': args.code_type}))
             except Exception as e: print(f"[Node {proc_rank}] Skipping n={n}: {e}")
 
-        # Distribute tasks
         my_tasks = [t for i, t in enumerate(all_tasks) if i % world_size == proc_rank]
         if not my_tasks: continue
         
-        # Calculate print interval to avoid flooding logs (e.g., update 10 times total)
-        total_tasks = len(my_tasks)
-        print_interval = max(1, total_tasks // 10)
-        
-        print(f"[Node {proc_rank}] Processing {total_tasks} tasks for {model_name}...")
+        # --- PROGRESS & SAVING ---
+        total_expected_shots = len(my_tasks) * args.max_shots
+        shots_collected = 0
+        last_print_time = 0
+        last_save_time = 0
+        import time 
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as tmp:
+        print(f"[Node {proc_rank}] Starting {model_name}: {len(my_tasks)} tasks, Target: {total_expected_shots:,} shots")
+
+        # Temp binary trace in tmp/
+        with tempfile.NamedTemporaryFile(dir=tmp_dir, delete=False, suffix=".bin") as tmp:
             trace_path = tmp.name
             
         try:
             mwpf_decoder = SinterMWPFDecoder(cluster_node_limit=50, trace_filename=trace_path)
-            
             collected_stats = []
-            
+            part_filename = os.path.join(results_dir, f"{base_filename}_{model_name}_rank{proc_rank}{output_ext}")
+
             iterator = sinter.iter_collect(
                 num_workers=args.workers, 
                 tasks=my_tasks, 
@@ -269,20 +284,29 @@ def main():
                 max_shots=args.max_shots
             )
             
-            # Manual loop to gather stats and print sparsely
-            for i, stat in enumerate(iterator):
-                collected_stats.append(stat)
+            for progress in iterator:
+                for stat in progress.new_stats:
+                    collected_stats.append(stat)
+                    shots_collected += stat.shots
                 
-                # Print only at specific intervals or at the very end
-                if (i + 1) % print_interval == 0 or (i + 1) == total_tasks:
-                    print(f"[Node {proc_rank}] {model_name} Progress: {i + 1}/{total_tasks} completed.", flush=True)
-            # ----------------------------------------
+                current_time = time.time()
+                
+                # Print Progress (every ~5s)
+                if (current_time - last_print_time > 5) or (shots_collected >= total_expected_shots):
+                    percent = (shots_collected / total_expected_shots) * 100 if total_expected_shots > 0 else 0.0
+                    print(f"[Node {proc_rank}] {model_name}: {shots_collected}/{total_expected_shots} ({percent:.1f}%)", flush=True)
+                    last_print_time = current_time
 
+                # Save Intermediate CSV (every ~30s)
+                if (current_time - last_save_time > 30):
+                    df = parse_and_average_stats(collected_stats, trace_path, model_name)
+                    df.to_csv(part_filename, index=False)
+                    last_save_time = current_time
+
+            # Final Save for this rank
             final_df = parse_and_average_stats(collected_stats, trace_path, model_name)
-            
-            part_filename = f"{output_base}_{model_name}_rank{proc_rank}{output_ext}"
             final_df.to_csv(part_filename, index=False)
-            print(f"[Node {proc_rank}] Saved {part_filename}")
+            print(f"[Node {proc_rank}] ✅ Finished {model_name}. Saved to {part_filename}")
 
         finally:
             if os.path.exists(trace_path):
