@@ -206,7 +206,7 @@ void MinSumBPDecoder::compute_variable_to_check() {
 std::vector<int> MinSumBPDecoder::get_hard_decision() {
     std::vector<int> res(num_vars);
     for (int i = 0; i < num_vars; ++i) {
-        res[i] = (posterior_ratios[i] < 0) ? 1 : 0;
+        res[i] = (posterior_ratios[i] <= 0.0) ? 1 : 0;
     }
     return res;
 }
@@ -257,7 +257,7 @@ RelayDecoder::RelayDecoder(const std::vector<int>& row_ptr,
                            int pre_iter, int num_legs, int iter_per_leg,
                            double gamma_min, double gamma_max, double gamma0,
                            unsigned long seed)
-    : bp_decoder(row_ptr, col_ind, n_rows, n_cols, priors, pre_iter, 0.625),
+    : bp_decoder(row_ptr, col_ind, n_rows, n_cols, priors, pre_iter, 1.0),
       pre_iter(pre_iter), num_legs(num_legs), iter_per_leg(iter_per_leg),
       gamma_min(gamma_min), gamma_max(gamma_max), gamma0(gamma0), rng(seed)
 {

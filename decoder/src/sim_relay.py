@@ -5,6 +5,7 @@ import sys
 import time
 import os
 import argparse
+import multiprocessing
 from datetime import datetime
 
 # Add path to finding local modules if needed, though being in the same dir helps
@@ -109,6 +110,37 @@ def simulate_single_shot(Hx, Hz, Lx, Lz, error_x, error_y, error_z, decoder_x, d
     
     return int(np.any(logical_fail_x)), int(np.any(logical_fail_z))
 
+# Worker function for multiprocessing
+def worker_task(task_args):
+    # Unpack arguments
+    Hx, Hz, Lx, Lz, error_rate, bias_factor, num_legs, shots, seed = task_args
+    
+    # Set seed for this worker
+    np.random.seed(seed)
+    
+    # Initialize decoders ONCE per worker task
+    decoder_x, decoder_z = initialize_decoder(Hx, Hz, error_rate, num_legs=num_legs)
+    
+    # Generate ALL errors in batch (vectorized)
+    error_x_batch, error_y_batch, error_z_batch = generate_errors(shots, Hx, error_rate, bias_factor)
+    
+    local_x = 0
+    local_z = 0
+    local_total = 0
+    
+    # Loop over shots
+    for i in range(shots):
+        fail_x, fail_z = simulate_single_shot(
+            Hx, Hz, Lx, Lz, 
+            error_x_batch[i], error_y_batch[i], error_z_batch[i], 
+            decoder_x, decoder_z
+        )
+        if fail_x: local_x += 1
+        if fail_z: local_z += 1
+        if fail_x or fail_z: local_total += 1
+        
+    return local_total, local_x, local_z
+
 def calc_ci(k_arr, n):
     k = np.array(k_arr)
     p_hat = k / n
@@ -121,26 +153,31 @@ def calc_ci(k_arr, n):
     return np.vstack((err_low, err_high))
 
 def run_simulation(ns, ps, bias_factor, num_legs, total_shots, filename):
-    # MPI Setup
-    if USE_MPI:
-        comm = MPI.COMM_WORLD
-        rank = comm.Get_rank()
-        size = comm.Get_size()
-    else:
-        rank = 0
-        size = 1
+    # Correct Path Construction relative to script location
+    # Target: ../../fig/RelayBP/filename
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    target_dir = os.path.join(script_dir, "../../fig/RelayBP/")
+    full_path = os.path.join(target_dir, filename)
+    
+    # Ensure directory exists
+    os.makedirs(target_dir, exist_ok=True)
 
-    shots_per_proc = total_shots // size
-    if rank == 0:
-        shots_per_proc += (total_shots % size)
-        
-    # Seed per rank
-    seed = int(datetime.now().timestamp()) + rank * 10000
-    np.random.seed(seed)
+    # Determine parallelism
+    num_workers = multiprocessing.cpu_count()
+    if num_workers > 1:
+        pool = multiprocessing.Pool(processes=num_workers)
+        shots_per_worker = total_shots // num_workers
+        remainder = total_shots % num_workers
+        # Distribute shots: first 'remainder' workers get +1 shot
+        shots_dist = [shots_per_worker + 1 if i < remainder else shots_per_worker for i in range(num_workers)]
+    else:
+        num_workers = 1
+        shots_dist = [total_shots]
+
+    base_seed = int(datetime.now().timestamp())
 
     for i_n, n in enumerate(ns):
-        if rank == 0:
-            print(f"Simulating for n={n}...", flush=True)
+        print(f"Simulating for n={n}...", flush=True)
 
         Hx = self_dual_H(n)
         Hz = Hx # Self-dual code
@@ -152,48 +189,43 @@ def run_simulation(ns, ps, bias_factor, num_legs, total_shots, filename):
         local_cpu_times = np.zeros(len(ps), dtype=np.float64)
 
         for idx, error_rate in enumerate(ps):
-            decoder_x, decoder_z = initialize_decoder(Hx, Hz, error_rate, num_legs=num_legs)
-            
             start_time = time.time()
-            error_x_local, error_y_local, error_z_local = generate_errors(shots_per_proc, Hx, error_rate, bias_factor)
-
-            for i in range(shots_per_proc):
-                fail_x, fail_z = simulate_single_shot(
-                    Hx, Hz, Lx, Lz, 
-                    error_x_local[i], error_y_local[i], error_z_local[i], 
-                    decoder_x, decoder_z
-                )
-                if fail_x: local_x_counts[idx] += 1
-                if fail_z: local_z_counts[idx] += 1
-                if fail_x or fail_z: local_total_counts[idx] += 1
             
+            if num_workers > 1:
+                # Prepare tasks
+                tasks = []
+                for i in range(num_workers):
+                    if shots_dist[i] > 0:
+                        worker_seed = base_seed + i * 1000 + idx
+                        tasks.append((Hx, Hz, Lx, Lz, error_rate, bias_factor, num_legs, shots_dist[i], worker_seed))
+                
+                results = pool.map(worker_task, tasks)
+                
+                # Aggregate results
+                for res in results:
+                    local_total_counts[idx] += res[0]
+                    local_x_counts[idx] += res[1]
+                    local_z_counts[idx] += res[2]
+            else:
+                # Serial execution fallback
+                task_args = (Hx, Hz, Lx, Lz, error_rate, bias_factor, num_legs, total_shots, base_seed)
+                res = worker_task(task_args)
+                local_total_counts[idx] = res[0]
+                local_x_counts[idx] = res[1]
+                local_z_counts[idx] = res[2]
+
             end_time = time.time()
             local_cpu_times[idx] = end_time - start_time
         
-        if USE_MPI:
-            global_total_counts = np.zeros(len(ps), dtype=np.int64) if rank == 0 else None
-            global_x_counts = np.zeros(len(ps), dtype=np.int64) if rank == 0 else None
-            global_z_counts = np.zeros(len(ps), dtype=np.int64) if rank == 0 else None
-            global_cpu_times = np.zeros(len(ps), dtype=np.float64) if rank == 0 else None
-
-            comm.Reduce(local_total_counts, global_total_counts, op=MPI.SUM, root=0)
-            comm.Reduce(local_x_counts, global_x_counts, op=MPI.SUM, root=0)
-            comm.Reduce(local_z_counts, global_z_counts, op=MPI.SUM, root=0)
-            comm.Reduce(local_cpu_times, global_cpu_times, op=MPI.SUM, root=0)
-        else:
-            global_total_counts = local_total_counts
-            global_x_counts = local_x_counts
-            global_z_counts = local_z_counts
-            global_cpu_times = local_cpu_times
-
-        if rank == 0 and pd is not None:
-            total_ler = global_total_counts / total_shots
-            x_ler = global_x_counts / total_shots
-            z_ler = global_z_counts / total_shots
-            avg_cpu_time = global_cpu_times / total_shots
-            total_ci_err = calc_ci(global_total_counts, total_shots)
-            x_ci_err = calc_ci(global_x_counts, total_shots)
-            z_ci_err = calc_ci(global_z_counts, total_shots)
+        # Save results (Single process logic, ignoring MPI for simplicity as requested)
+        if pd is not None:
+            total_ler = local_total_counts / total_shots
+            x_ler = local_x_counts / total_shots
+            z_ler = local_z_counts / total_shots
+            avg_cpu_time = local_cpu_times / total_shots
+            total_ci_err = calc_ci(local_total_counts, total_shots)
+            x_ci_err = calc_ci(local_x_counts, total_shots)
+            z_ci_err = calc_ci(local_z_counts, total_shots)
 
             data_rows = []
             for j, p in enumerate(ps):
@@ -215,9 +247,9 @@ def run_simulation(ns, ps, bias_factor, num_legs, total_shots, filename):
                 data_rows.append(row)
             
             new_df = pd.DataFrame(data_rows)
-            if os.path.exists(filename):
+            if os.path.exists(full_path):
                 try:
-                    existing_df = pd.read_csv(filename)
+                    existing_df = pd.read_csv(full_path)
                     existing_df = existing_df[existing_df['n'] != n]
                     final_df = pd.concat([existing_df, new_df], ignore_index=True)
                     final_df = final_df.sort_values(by=['n', 'p'])
@@ -225,23 +257,30 @@ def run_simulation(ns, ps, bias_factor, num_legs, total_shots, filename):
                     final_df = new_df
             else:
                 final_df = new_df
-            final_df.to_csv(filename, index=False)
-            print(f"Data saved to {filename}")
+            final_df.to_csv(full_path, index=False)
+            print(f"Data saved to {full_path}")
+
+    if num_workers > 1:
+        pool.close()
+        pool.join()
 
 def main():
     parser = argparse.ArgumentParser(description="Relay-BP Simulation")
-    parser.add_argument("--shots", type=int, default=1000, help="Number of shots")
     parser.add_argument("--legs", type=int, default=10, help="Number of relay legs")
     args = parser.parse_args()
 
     # Params
     ns = [4, 6, 8, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30]
     ps = np.logspace(-3, -1, 20).tolist()
-    bias_factor = 0.5
     
-    filename = f"relaybp_bias{bias_factor}_shots{args.shots}.csv"
+    shot_counts = [10, 100, 1000, 10000, 100000, 1000000]
+    biases = [0.0, 0.5]
     
-    run_simulation(ns, ps, bias_factor, args.legs, args.shots, filename)
+    for shots in shot_counts:
+        for bias_factor in biases:
+            print(f"--- Running simulation for {shots} shots, bias {bias_factor} ---")
+            filename = f"relaybp_bias{bias_factor}_shots{shots}.csv"
+            run_simulation(ns, ps, bias_factor, args.legs, shots, filename)
 
 if __name__ == "__main__":
     main()
