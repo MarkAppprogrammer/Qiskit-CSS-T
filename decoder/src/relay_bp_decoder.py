@@ -235,7 +235,7 @@ class MinSumBPDecoder:
         # Negative LLR means likelihood of error is higher (in some conventions).
         # Standard convention: LLR = log(P(no error) / P(error))
         # So LLR < 0 implies Error.
-        return (self.posterior_ratios < 0).astype(np.uint8)
+        return (self.posterior_ratios <= 0).astype(np.uint8)
 
     def decode(self, syndrome):
         # Only initialize if it's the first run or if explicitly reset externally
