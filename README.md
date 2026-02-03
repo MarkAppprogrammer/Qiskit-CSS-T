@@ -1,5 +1,5 @@
 # Quantum Error Correction Codes for Clifford Gates and T Gates
-/This is the output from [the research-oriented project proposed in the Qiskit Advocate Mentor Program 2025](https://github.com/qiskit-advocate/qamp-2025/issues/41#issuecomment-3320946065)/
+*This is the output from [the research-oriented project proposed in the Qiskit Advocate Mentor Program 2025](https://github.com/qiskit-advocate/qamp-2025/issues/41#issuecomment-3320946065)*
  
 The outputs are
 - Library of QEC Codes
@@ -7,7 +7,7 @@ The outputs are
   - supporting transversal T gates  (../doubling-CSST/JA25_triorthogonal/)
 - Usage Example of the recursive doubling construction for new code supporting transversal T gates (../doubling-CSST/readAlist.ipynb)
   
-- Decoding simulations on these code (../decoder/)
+- Decoding simulations on these codes (../decoder/)
   - MWPF
   - BP-OSD
   - RelayBP
