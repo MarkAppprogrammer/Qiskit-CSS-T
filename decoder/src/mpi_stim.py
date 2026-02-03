@@ -9,7 +9,7 @@ import galois
 import stim
 import sinter
 import traceback
-from typing import List
+from typing import List, Tuple
 
 # --- SETUP PATHS ---
 sys.path.append(".")
@@ -25,8 +25,8 @@ try:
         bravyi_noise_model
     )
 except ImportError as e:
-    print(f"CRITICAL ERROR: Could not import dependencies. {e}")
-    sys.exit(1)
+    # Non-critical if just checking syntax, but critical for running
+    pass
 
 # --- CONFIGURATION ---
 BASE_ALIST_DIR_DEV = "../../doubling-CSST/alistMats/"
@@ -65,7 +65,8 @@ def get_parity_matrices(n: int, config: dict):
         if not os.path.exists(alistFilePath): raise FileNotFoundError(f"Missing: {alistFilePath}")
         GenMat = F2(readAlist(alistFilePath))
         if if_self_dual:
-            G_punctured = GenMat[:, :-1]; Hz = Hx = G_punctured.null_space() 
+            G_punctured = GenMat[:, :-1]
+            Hz = Hx = G_punctured.null_space() 
         else:
             Hz = Hx = GenMat.null_space()
     return np.array(Hx, dtype=np.uint8), np.array(Hz, dtype=np.uint8)
@@ -85,6 +86,31 @@ def append_layered_cnots(c, check_matrix, ancilla_idxs, data_idxs, ancilla_is_co
                 anc = ancilla_idxs[i]; dat = targets[k]
                 layer_args.extend([anc, dat] if ancilla_is_control else [dat, anc])
         if layer_args: c.append("CX", layer_args); c.append("TICK")
+
+def find_logical_operator(Hx, Hz, basis="Z"):
+    """
+    Finds a logical operator that is NOT a stabilizer.
+    """
+    F2 = galois.GF(2)
+    gf_Hx = F2(Hx)
+    gf_Hz = F2(Hz)
+    
+    if basis == "Z":
+        candidates = gf_Hx.null_space() # Commutes with X-checks
+        stabilizers = gf_Hz # Z-stabilizers
+    else:
+        candidates = gf_Hz.null_space()
+        stabilizers = gf_Hx
+
+    current_rank = np.linalg.matrix_rank(stabilizers)
+    
+    for cand in candidates:
+        combined = np.vstack([stabilizers, cand])
+        new_rank = np.linalg.matrix_rank(combined)
+        if new_rank > current_rank:
+            return np.array(cand, dtype=np.uint8)
+            
+    raise ValueError(f"Could not find a Logical {basis} operator!")
 
 def generate_css_memory_experiment(Hx, Hz, rounds, memory_basis="Z"):
     num_data = Hx.shape[1]; num_x_checks = Hx.shape[0]; num_z_checks = Hz.shape[0]
@@ -141,8 +167,7 @@ def generate_css_memory_experiment(Hx, Hz, rounds, memory_basis="Z"):
             rec.append(stim.target_rec(-(num_data + num_z_checks + num_x_checks - i)))
             circuit.append("DETECTOR", rec, [x_anc_coords[i][0], x_anc_coords[i][1], 0])
 
-    GF = galois.GF(2); lx = GF(Hz.astype(int)).null_space()[0]; lz = GF(Hx.astype(int)).null_space()[0]
-    op = lz if memory_basis == "Z" else lx
+    op = find_logical_operator(Hx, Hz, basis=memory_basis)
     circuit.append("OBSERVABLE_INCLUDE", [stim.target_rec(-(num_data - k)) for k in np.flatnonzero(op)], 0)
     return circuit
 
@@ -154,14 +179,9 @@ def generate_experiment_with_noise(
     noise_params: dict,
     memory_basis: str = "Z"
 ) -> stim.Circuit:
-    # 1. Generate clean circuit
     clean_circuit = generate_css_memory_experiment(Hx, Hz, rounds, memory_basis=memory_basis)
-    
-    # 2. Identify data qubits
     num_data = Hx.shape[1]
     data_qubits = list(range(num_data))
-
-    # 3. Apply Noise Model
     base_p = noise_params['p']
 
     if noise_model_name == "depolarizing":
@@ -173,32 +193,21 @@ def generate_experiment_with_noise(
             before_measure_flip_probability=noise_params.get('p_meas', base_p),
             before_round_data_depolarization=noise_params.get('p_data_round', base_p)
         )
-        
     elif noise_model_name == "si1000":
-        return si1000_noise_model(
-            circuit=clean_circuit,
-            data_qubits=data_qubits,
-            probability=base_p
-        )
-        
-    elif noise_model_name == "bravyi":
-        return bravyi_noise_model(
-            circuit=clean_circuit,
-            error_rate=base_p
-        )
+        return si1000_noise_model(circuit=clean_circuit, data_qubits=data_qubits, probability=base_p)
     else:
         raise ValueError(f"Unknown noise model: {noise_model_name}")
 
-
 def parse_and_average_stats(stats: List[sinter.TaskStats], trace_file: str, model_name: str) -> pd.DataFrame:
-    try:
-        # Calls the static method on the imported class
-        df_details = SinterMWPFDecoder.parse_mwpf_trace(trace_file)
-        if not df_details.empty:
-            avg_obj = df_details['objective_value'].mean()
-            avg_cpu = df_details['cpu_time'].mean()
-        else: avg_obj = 0.0; avg_cpu = 0.0
-    except Exception: avg_obj = 0.0; avg_cpu = 0.0
+    avg_obj = 0.0; avg_cpu = 0.0
+    # Try parsing trace file if it exists and has content
+    if os.path.exists(trace_file) and os.path.getsize(trace_file) > 0:
+        try:
+            df_details = SinterMWPFDecoder.parse_mwpf_trace(trace_file)
+            if not df_details.empty:
+                avg_obj = df_details['objective_value'].mean()
+                avg_cpu = df_details['cpu_time'].mean()
+        except Exception: pass
     
     results = []
     for s in stats:
@@ -218,7 +227,7 @@ def main():
     slurm_cpus = os.environ.get('SLURM_CPUS_PER_TASK')
     default_workers = int(slurm_cpus) if slurm_cpus else os.cpu_count()
     parser.add_argument("--workers", type=int, default=default_workers)
-    parser.add_argument("--max_shots", type=int, default=1_000_000)
+    parser.add_argument("--max_shots", type=int, default=10_000_000)
     parser.add_argument("--output", type=str, default="results.csv")
     parser.add_argument("--code_type", type=str, choices=["self_dual", "dual_containing"], required=True)
     args = parser.parse_args()
@@ -228,16 +237,13 @@ def main():
     
     selected_config = CODE_CONFIGS[args.code_type]
     n_list = selected_config["default_n_list"]
-    noise_values = np.logspace(-4, -2, 10).tolist()
-    models_to_run = ["depolarizing", "si1000"]
+    noise_values = np.logspace(-5, -3, 10).tolist()
+    models_to_run = ["depolarizing"] #, "si1000"
 
-    # --- DIRECTORY SETUP ---
     ver_dir = os.path.dirname(args.output)
     if not ver_dir: ver_dir = "."
-
     results_dir = os.path.join(ver_dir, "results")
     tmp_dir = os.path.join(ver_dir, "tmp")
-
     os.makedirs(results_dir, exist_ok=True)
     os.makedirs(tmp_dir, exist_ok=True)
 
@@ -254,65 +260,97 @@ def main():
                     circuit = generate_experiment_with_noise(Hx, Hz, d*3, model_name, {"p": p})
                     all_tasks.append(sinter.Task(circuit=circuit, decoder='mwpf', 
                         json_metadata={'n': n, 'd': d, 'r': d*3, 'p': p, 'noise_model': model_name, 'code_type': args.code_type}))
-            except Exception as e: print(f"[Node {proc_rank}] Skipping n={n}: {e}")
+            except Exception as e: 
+                print(f"[Node {proc_rank}] Skipping n={n}: {e}")
+                traceback.print_exc()
 
         my_tasks = [t for i, t in enumerate(all_tasks) if i % world_size == proc_rank]
         if not my_tasks: continue
         
-        # --- PROGRESS & SAVING ---
         total_expected_shots = len(my_tasks) * args.max_shots
-        shots_collected = 0
-        last_print_time = 0
-        last_save_time = 0
         import time 
 
-        print(f"[Node {proc_rank}] Starting {model_name}: {len(my_tasks)} tasks, Target: {total_expected_shots:,} shots")
+        # Persistent Paths
+        resume_path = os.path.join(tmp_dir, f"resume_{base_filename}_{model_name}_{proc_rank}.sinter")
+        trace_path = os.path.join(tmp_dir, f"trace_{base_filename}_{model_name}_{proc_rank}.bin")
+        part_filename = os.path.join(results_dir, f"{base_filename}_{model_name}_rank{proc_rank}{output_ext}")
 
-        # Temp binary trace in tmp/
-        with tempfile.NamedTemporaryFile(dir=tmp_dir, delete=False, suffix=".bin") as tmp:
-            trace_path = tmp.name
-            
+        print(f"[Node {proc_rank}] Processing {model_name}. Trace: {trace_path}")
+
+        # 1. LOAD PREVIOUS DATA (MANUAL RESUME)
+        existing_data = []
+        if os.path.exists(resume_path):
+            try:
+                existing_data = sinter.stats_from_csv_files(resume_path)
+                print(f"[Node {proc_rank}] Resuming {model_name} from {len(existing_data)} records.")
+            except Exception: pass
+        else:
+            # If no resume file, clear the trace file to ensure consistency
+            if os.path.exists(trace_path): os.remove(trace_path)
+
         try:
             mwpf_decoder = SinterMWPFDecoder(cluster_node_limit=50, trace_filename=trace_path)
-            collected_stats = []
-            part_filename = os.path.join(results_dir, f"{base_filename}_{model_name}_rank{proc_rank}{output_ext}")
-
+            
+            # 2. ITERATOR WITH EXISTING DATA PASS-THROUGH
             iterator = sinter.iter_collect(
                 num_workers=args.workers, 
                 tasks=my_tasks, 
                 custom_decoders={"mwpf": mwpf_decoder},
-                max_shots=args.max_shots
+                max_shots=args.max_shots,
+                additional_existing_data=existing_data,
+                max_batch_seconds=30
             )
             
-            for progress in iterator:
-                for stat in progress.new_stats:
-                    collected_stats.append(stat)
-                    shots_collected += stat.shots
-                
-                current_time = time.time()
-                
-                # Print Progress (every ~5s)
-                if (current_time - last_print_time > 5) or (shots_collected >= total_expected_shots):
-                    percent = (shots_collected / total_expected_shots) * 100 if total_expected_shots > 0 else 0.0
-                    print(f"[Node {proc_rank}] {model_name}: {shots_collected}/{total_expected_shots} ({percent:.1f}%)", flush=True)
-                    last_print_time = current_time
+            last_save_time = 0
+            
+            # 3. MANUAL APPEND TO RESUME FILE
+            with open(resume_path, 'a') as resume_file:
+                if resume_file.tell() == 0:
+                    print(sinter.CSV_HEADER, file=resume_file)
 
-                # Save Intermediate CSV (every ~30s)
-                if (current_time - last_save_time > 30):
-                    df = parse_and_average_stats(collected_stats, trace_path, model_name)
-                    df.to_csv(part_filename, index=False)
-                    last_save_time = current_time
+                for progress in iterator:
+                    # Write new stats to disk immediately
+                    for stat in progress.new_stats:
+                        print(stat.to_csv_line(), file=resume_file, flush=True)
 
-            # Final Save for this rank
-            final_df = parse_and_average_stats(collected_stats, trace_path, model_name)
-            final_df.to_csv(part_filename, index=False)
-            print(f"[Node {proc_rank}] ✅ Finished {model_name}. Saved to {part_filename}")
+                    current_time = time.time()
+                    
+                    if (current_time - last_save_time > 10):
+                        # Reload from disk to get correct totals (accumulating over time)
+                        try:
+                            full_stats = sinter.stats_from_csv_files(resume_path)
+                            total_done = sum(s.shots for s in full_stats)
+                            
+                            # --- CALCULATE PERCENTAGE ---
+                            pct = (total_done / total_expected_shots * 100) if total_expected_shots > 0 else 0
+                            print(f"[Node {proc_rank}] {model_name}: {total_done} shots ({pct:.2f}%).", flush=True)
+                            
+                            # Save basic stats to results CSV (without parsing heavy trace file)
+                            results = []
+                            for s in full_stats:
+                                m = s.json_metadata
+                                results.append({
+                                    'noise_model': model_name, 'n': m['n'], 'd': m['d'], 'r': m['r'], 'p': m['p'],
+                                    'code_type': m.get('code_type', 'unknown'), 'shots': s.shots, 'errors': s.errors,
+                                    'total_logical_error_rate': s.errors / s.shots if s.shots > 0 else 0
+                                })
+                            pd.DataFrame(results).to_csv(part_filename, index=False)
+                        except Exception: pass
+                        last_save_time = current_time
 
-        finally:
-            if os.path.exists(trace_path):
-                for f in glob.glob(f"{trace_path}*"):
-                    try: os.remove(f)
-                    except OSError: pass
+            print(f"[Node {proc_rank}] Simulation done. Parsing trace file (this may take memory)...")
+            
+            full_stats = sinter.stats_from_csv_files(resume_path)
+            try:
+                final_df = parse_and_average_stats(full_stats, trace_path, model_name)
+                final_df.to_csv(part_filename, index=False)
+                print(f"[Node {proc_rank}] ✅ Finished {model_name}. Full data saved.")
+            except Exception as e:
+                print(f"[Node {proc_rank}] ⚠️ Failed trace parsing: {e}. Basic stats preserved.")
+
+        except Exception as e:
+            print(f"CRITICAL ERROR in {model_name}: {e}")
+            traceback.print_exc()
 
 if __name__ == "__main__":
     main()
