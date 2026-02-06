@@ -6,7 +6,9 @@ import numpy as np
 import scipy.stats
 
 # --- CONFIGURATION ---
-INPUT_DIR = os.path.expandvars("$HOME/Desktop/Qiskit-CSS-T/decoder/data/results")
+# INPUT_DIR = os.path.expandvars("$HOME/Desktop/Qiskit-CSS-T/decoder/data/self_dual/results")
+INPUT_DIR = os.path.expandvars("$HOME/Desktop/Qiskit-CSS-T/decoder/data/dual_containing/results")
+
 # INPUT_DIR = os.path.expandvars("$HOME/work/Qiskit-CSS-T/decoder/data/1/results")
 ALPHA = 0.05
 
