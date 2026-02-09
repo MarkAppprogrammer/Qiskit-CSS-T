@@ -11,6 +11,7 @@ import traceback
 
 # --- SETUP PATHS ---
 sys.path.append(".")
+# Fallback import for convert_alist
 if not os.path.exists("convert_alist.py"):
     sys.path.append('../../../doubling-CSST/')
 
@@ -25,15 +26,19 @@ from noise_models import standard_depolarizing_noise_model
 
 def get_effective_distance(circuit: stim.Circuit) -> int:
     """
-    Calculates effective code distance. Returns 0 if calculation fails 
-    (common for 3D codes with hypergraph errors that Stim ignores).
+    Attempts to calculate the effective code distance using Stim's graph analysis.
+    NOTE: This often fails for 3D codes (Hypergraph codes) where errors trigger >2 detectors.
+    Returns 0 if calculation fails.
     """
     try:
+        # decompose_errors=True attempts to break hyperedges, but isn't magic.
+        # ignore_ungraphlike_errors=True allows the code to run even if some errors are complex.
         return len(circuit.shortest_graphlike_error(
             ignore_ungraphlike_errors=True,
             decompose_errors=True
         ))
     except ValueError:
+        # This usually implies the error graph is empty or disconnected due to hyperedges
         return 0
 
 def evaluate_schedule(args):
@@ -48,10 +53,12 @@ def evaluate_schedule(args):
                 schedule[(anc_idx, data_idx)] = priority
 
     try:
+        # Generate circuit
         circuit = generate_css_memory_experiment(
             Hx, Hz, rounds=rounds, memory_basis="Z", schedule=schedule
         )
         
+        # Add noise to create the error graph
         noisy_circuit = standard_depolarizing_noise_model(
             circuit=circuit,
             data_qubits=data_qubits,
@@ -60,14 +67,17 @@ def evaluate_schedule(args):
             before_measure_flip_probability=0.001,
             before_round_data_depolarization=0.001
         )
+        
         dist = get_effective_distance(noisy_circuit)
         return dist, schedule
     except Exception:
+        # If construction fails entirely, return 0
         return 0, schedule
 
 def optimize_code_schedule(val, config, max_attempts=500):
     print(f"\n--- Optimizing val={val} ({config.get('type', 'local')}) ---")
     
+    # 1. Load Matrices
     try:
         Hx, Hz = get_parity_matrices(val, config)
     except Exception as e:
@@ -77,11 +87,15 @@ def optimize_code_schedule(val, config, max_attempts=500):
     num_data = Hx.shape[1]
     data_qubits = list(range(num_data))
     
+    # 2. Determine Parameters
     if config.get('source') == 'qcodeplot3d':
         d = val
+        theo_d = val
     else:
-        d = config['dist_dict'].get(val, '?')
+        d = config['dist_dict'].get(val, 0)
+        theo_d = d
 
+    # 3. Analyze Stabilizers
     adjacency = {}
     max_weight = 0
     weights = []
@@ -94,11 +108,13 @@ def optimize_code_schedule(val, config, max_attempts=500):
     
     print(f"  Stabilizer weights: avg={np.mean(weights):.1f}, max={max_weight}")
     
-    # Strategy Generation
+    # 4. Generate Candidates
     candidates = []
-    candidates.append(tuple(range(max_weight))) # Sequential
-    candidates.append(tuple(range(max_weight-1, -1, -1))) # Reverse
-    
+    # Deterministic: Sequential
+    candidates.append(tuple(range(max_weight)))
+    # Deterministic: Reverse
+    candidates.append(tuple(range(max_weight-1, -1, -1)))
+    # Deterministic: Interleaved (Good for lattice interference)
     if max_weight >= 4:
         pairs = []
         for i in range(0, max_weight - 1, 2):
@@ -106,6 +122,7 @@ def optimize_code_schedule(val, config, max_attempts=500):
         if max_weight % 2 == 1: pairs.append(max_weight - 1)
         candidates.append(tuple(pairs))
 
+    # Random fills
     remaining_slots = max_attempts - len(candidates)
     if max_weight <= 7:
         all_perms = list(itertools.permutations(range(max_weight)))
@@ -119,12 +136,16 @@ def optimize_code_schedule(val, config, max_attempts=500):
             random.shuffle(p)
             candidates.append(tuple(p))
 
-    rounds = d + 1 if isinstance(d, int) else 5
+    # 5. Evaluate Candidates
+    # Use d if integer, else default to 5
+    rounds = d + 1 if isinstance(d, int) and d > 0 else 5
+    
     worker_args = [(Hx, Hz, rounds, p, adjacency, data_qubits) for p in candidates]
     
     best_dist = -1
     best_schedule = None
     
+    # Run parallel evaluation
     num_procs = min(cpu_count(), 20)
     with Pool(processes=num_procs) as pool:
         results = pool.map(evaluate_schedule, worker_args)
@@ -134,9 +155,11 @@ def optimize_code_schedule(val, config, max_attempts=500):
             best_dist = dist
             best_schedule = sched
     
-    # Fallback for 3D codes if verification fails
+    # 6. Fallback Logic for 3D/Hypergraph Codes
     if best_dist == 0:
-        print(f"  Warning: Eff_Dist=0 (Likely 3D hypergraph issue). Defaulting to Sequential.")
+        print(f"  Warning: Effective distance is 0. This is expected for 3D codes due to hypergraph errors.")
+        print(f"  -> Defaulting to 'Sequential' schedule to ensure simulation can proceed.")
+        
         # Reconstruct sequential schedule
         seq_perm = tuple(range(max_weight))
         best_schedule = {}
@@ -147,7 +170,9 @@ def optimize_code_schedule(val, config, max_attempts=500):
                     data_idx = targets[target_index_in_list]
                     best_schedule[(anc_idx, data_idx)] = priority
         
-    print(f"  Result: Eff_Dist={best_dist} (Theory={d})")
+        # We leave best_dist as 0 to indicate it wasn't verified by Stim
+        
+    print(f"  Selected Schedule Distance: {best_dist} (Theory={theo_d})")
     return best_schedule, best_dist
 
 def main():
@@ -173,6 +198,7 @@ def main():
             
         schedule, eff_dist = optimize_code_schedule(val, config, args.max_attempts)
         
+        # Determine theoretical distance for report
         if config.get('source') == 'qcodeplot3d':
             theo_d = val
         else:
