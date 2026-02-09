@@ -6,6 +6,8 @@ import sinter
 import traceback
 import time
 import glob
+import shutil
+import uuid
 
 # Add local directory
 sys.path.append(".")
@@ -31,7 +33,7 @@ def main():
     
     selected_config = CODE_CONFIGS[args.code_type]
     iter_list = selected_config.get("iter_list", selected_config.get("n_list", [])) 
-    noise_values = np.logspace(-5, -2, 15).tolist()
+    noise_values = np.logspace(-5, -3, 10).tolist()
     
     ver_dir = os.path.dirname(args.output)
     if not ver_dir: ver_dir = "."
@@ -49,125 +51,140 @@ def main():
     output_ext = os.path.splitext(args.output)[1]
 
     for model_name in ["depolarizing"]:
-        all_tasks = []
+        
+        all_task_defs = []
+        
+        # 1. Generate Task Definitions
         for val in iter_list:
             try:
-                # 1. Load Parity Matrices
                 Hx, Hz = get_parity_matrices(val, selected_config)
-                
-                # 2. Determine n and d
                 real_n = Hx.shape[1]
-                if selected_config.get('source') == 'qcodeplot3d':
-                    d = val
-                else:
-                    d = selected_config['dist_dict'][val]
+                d = val if selected_config.get('source') == 'qcodeplot3d' else selected_config['dist_dict'][val]
 
-                # 3. Load Schedule
                 schedule_file = os.path.join(sched_dir, f"sched_{args.code_type}_val{val}.json")
-                best_schedule = None
-                if os.path.exists(schedule_file):
-                    if proc_rank == 0: print(f"[Node 0] Loading schedule for {args.code_type} val={val}")
-                    best_schedule = load_schedule(schedule_file)
-                else:
-                    if proc_rank == 0: print(f"[Node 0] Default schedule for {args.code_type} val={val}")
-                    best_schedule = {} 
+                best_schedule = load_schedule(schedule_file) if os.path.exists(schedule_file) else {} 
 
-                # 4. Generate Tasks
                 for p in noise_values:
                     circuit = generate_experiment_with_noise(
                         Hx, Hz, d*3, model_name, {"p": p}, schedule=best_schedule
                     )
-                    all_tasks.append(sinter.Task(
-                        circuit=circuit, decoder='mwpf',
+                    
+                    # We create the task here, but we will assign the specific decoder later
+                    task_def = sinter.Task(
+                        circuit=circuit, 
+                        decoder='mwpf', # Placeholder
                         json_metadata={
-                            'n': real_n, 
-                            'd': d, 
-                            'r': d*3, 
-                            'p': p, 
-                            'noise_model': model_name, 
-                            'code_type': args.code_type,
-                            'iter_val': val
+                            'n': real_n, 'd': d, 'r': d*3, 'p': p, 
+                            'noise_model': model_name, 'code_type': args.code_type, 'iter_val': val
                         }
-                    ))
-            except Exception as e: 
-                print(f"[Node {proc_rank}] Skipping val={val}: {e}")
-                # traceback.print_exc()
+                    )
+                    all_task_defs.append(task_def)
+            except Exception as e:
+                if proc_rank == 0: print(f"Skipping val={val}: {e}")
 
-        my_tasks = [t for i, t in enumerate(all_tasks) if i % world_size == proc_rank]
+        # 2. Filter tasks for THIS rank
+        my_tasks = [t for i, t in enumerate(all_task_defs) if i % world_size == proc_rank]
         if not my_tasks: continue
-        
-        resume_path = os.path.join(tmp_dir, f"resume_{base_filename}_{model_name}_{proc_rank}.sinter")
-        trace_path = os.path.join(tmp_dir, f"trace_{base_filename}_{model_name}_{proc_rank}.bin")
-        part_filename = os.path.join(results_dir, f"{base_filename}_{model_name}_rank{proc_rank}{output_ext}")
 
+        # 3. Setup Custom Decoders for Isolation
+        # We create a unique decoder ID and unique trace file for EVERY task.
+        custom_decoders = {}
+        
+        for task in my_tasks:
+            meta = task.json_metadata
+            # Create a unique key for this specific task
+            unique_id = f"mwpf_n{meta['n']}_p{meta['p']:.6e}_{uuid.uuid4().hex[:6]}"
+            
+            # Create a unique trace file for this task
+            trace_filename = os.path.join(tmp_dir, f"trace_{unique_id}.bin")
+            
+            # Clean up old file if it exists (paranoid check)
+            for f in glob.glob(f"{trace_filename}*"):
+                try: os.remove(f)
+                except: pass
+
+            # Update the task to use this unique decoder key
+            task.decoder = unique_id
+            
+            # Save the trace path in metadata so the parser knows where to look later
+            task.json_metadata['trace_path'] = trace_filename
+            
+            # Register the decoder
+            custom_decoders[unique_id] = SinterMWPFDecoder(
+                cluster_node_limit=50, 
+                trace_filename=trace_filename
+            )
+
+        # 4. Run Sinter (Batch Mode)
+        # We pass ALL tasks at once so Sinter can calculate ETA and show the table.
+        resume_path = os.path.join(tmp_dir, f"resume_{base_filename}_{model_name}_{proc_rank}.sinter")
+        part_filename = os.path.join(results_dir, f"{base_filename}_{model_name}_rank{proc_rank}{output_ext}")
+        
         existing_data = []
         if os.path.exists(resume_path):
             try: existing_data = sinter.stats_from_csv_files(resume_path)
-            except Exception: pass
-        else:
-            for old_f in glob.glob(f"{trace_path}*"):
-                try: os.remove(old_f)
-                except: pass
+            except: pass
 
         try:
-            mwpf_decoder = SinterMWPFDecoder(cluster_node_limit=50, trace_filename=trace_path)
-
             iterator = sinter.iter_collect(
                 num_workers=args.workers, 
                 tasks=my_tasks, 
-                custom_decoders={"mwpf": mwpf_decoder},
+                custom_decoders=custom_decoders,
                 max_shots=args.max_shots,
                 additional_existing_data=existing_data,
                 max_batch_seconds=30,
                 max_batch_size=1000
             )
             
-            last_print_time = 0
-            last_disk_write_time = 0 
-            
             with open(resume_path, 'a') as resume_file:
                 if resume_file.tell() == 0: print(sinter.CSV_HEADER, file=resume_file)
                 
+                last_print_time = 0
+                last_save_time = 0
+                
                 for progress in iterator:
-                    # 1. Write Raw Data
+                    # 1. Save Raw Data
                     for stat in progress.new_stats:
                         print(stat.to_csv_line(), file=resume_file, flush=True)
                     
                     current_time = time.time()
                     
-                    # 2. Print Progress to Console
-                    if current_time - last_print_time > 5.0: 
+                    # 2. Print Live Table
+                    if current_time - last_print_time > 0.5:
                         if is_slurm_mode:
-                            if proc_rank == 0:
-                                print(f"[Node 0] Progress: {progress.status_message}", flush=True)
+                            if current_time - last_print_time > 5.0:
+                                print(f"\n{progress.status_message}", flush=True)
+                                last_print_time = current_time
                         else:
-                            # Use carriage return \r to update the same line locally
-                            print(f"\r{progress.status_message}", end="", flush=True)
-                        last_print_time = current_time
+                            # Standard Sinter table output
+                            print(f"\n{progress.status_message}", flush=True)
+                            last_print_time = current_time
 
-                    # 3. Auto-Save Final CSV
-                    if current_time - last_disk_write_time > 300.0:
+                    # 3. Auto-save Parsed Results
+                    if current_time - last_save_time > 300.0:
                         try:
-                            resume_file.flush() 
-                            current_full_stats = sinter.stats_from_csv_files(resume_path)
-                            current_df = parse_and_average_stats(current_full_stats, trace_path, model_name)
-                            current_df.to_csv(part_filename, index=False)
-                            if proc_rank == 0:
-                                if is_slurm_mode:
-                                    print(f"\n[Node 0] (Auto-Save) Updated {part_filename}", flush=True)
-                        except Exception as e:
-                            pass # Ignore write errors during runtime
-                        
-                        last_disk_write_time = current_time
-            
-            if not is_slurm_mode: print() # Newline after progress bar
-            
+                            resume_file.flush()
+                            curr_stats = sinter.stats_from_csv_files(resume_path)
+                            curr_df = parse_and_average_stats(curr_stats, model_name) 
+                            curr_df.to_csv(part_filename, index=False)
+                        except Exception: pass
+                        last_save_time = current_time
+
             # Final Save
             full_stats = sinter.stats_from_csv_files(resume_path)
-            final_df = parse_and_average_stats(full_stats, trace_path, model_name)
+            final_df = parse_and_average_stats(full_stats, model_name)
             final_df.to_csv(part_filename, index=False)
-            print(f"[Node {proc_rank}] ✅ Finished {model_name}.")
             
+            # Cleanup Trace Files
+            for t in my_tasks:
+                tf = t.json_metadata.get('trace_path')
+                if tf:
+                    for f in glob.glob(f"{tf}*"):
+                        try: os.remove(f)
+                        except: pass
+
+            print(f"[Node {proc_rank}] ✅ Finished {model_name}.")
+
         except Exception as e: 
             print(f"[Node {proc_rank}] Fail: {e}")
             traceback.print_exc()

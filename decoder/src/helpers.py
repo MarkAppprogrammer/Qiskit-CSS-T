@@ -1,11 +1,28 @@
 import os
+import sys
 import numpy as np
 import pandas as pd
 import galois
 import sinter
+import glob
 from typing import List, Tuple
 
-# --- QCodePlot3D Integration ---
+# --- PATH SETUP FOR DEPENDENCIES ---
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(CURRENT_DIR))
+DOUBLING_CSST_PATH = os.path.join(PROJECT_ROOT, "doubling-CSST")
+
+if os.path.exists(DOUBLING_CSST_PATH):
+    if DOUBLING_CSST_PATH not in sys.path:
+        sys.path.append(DOUBLING_CSST_PATH)
+
+# --- IMPORTS ---
+try:
+    from convert_alist import readAlist
+except ImportError:
+    def readAlist(path):
+        raise ImportError(f"Could not import 'convert_alist.py'. Checked path: {DOUBLING_CSST_PATH}")
+
 try:
     from qcodeplot3d.cc_3d import cubic_3d_dual_graph, tetrahedron_3d_dual_graph
     from qcodeplot3d.cc_2d import triangular_2d_dual_graph, square_2d_dual_graph
@@ -15,7 +32,6 @@ except ImportError:
     HAS_QCODEPLOT = False
 
 try:
-    from convert_alist import readAlist
     from mwpf.sinter_decoders import SinterMWPFDecoder 
 except ImportError:
     pass
@@ -23,7 +39,7 @@ except ImportError:
 # --- SHARED CONFIGURATION ---
 BASE_ALIST_DIR_DEV = "../../../doubling-CSST/alistMats/"
 BASE_ALIST_DIR_LOCAL = "./alistMats/"
-BASE_ALIST_DIR_PROJECT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "doubling-CSST/alistMats/")
+BASE_ALIST_DIR_PROJECT = os.path.join(DOUBLING_CSST_PATH, "alistMats/")
 BASE_ALIST_PATH = BASE_ALIST_DIR_LOCAL if os.path.exists(BASE_ALIST_DIR_LOCAL) else (BASE_ALIST_DIR_PROJECT if os.path.exists(BASE_ALIST_DIR_PROJECT) else BASE_ALIST_DIR_DEV)
 
 # 1. Existing Codes
@@ -56,7 +72,6 @@ CODE_CONFIGS = {
         "iter_list": [15, 49, 95, 185, 189, 279],
         "alist_suffix": ".alist"
     },
-    # Geometric Codes
     "cubic": { "source": "qcodeplot3d", "type": "cubic", "iter_list": [3, 5, 7, 9] },
     "tetrahedral": { "source": "qcodeplot3d", "type": "tetrahedral", "iter_list": [3, 5, 7] },
     "triangular": { "source": "qcodeplot3d", "type": "triangular", "iter_list": [3, 5, 7, 9, 11] },
@@ -67,7 +82,6 @@ def _extract_geometric_matrices(code_type: str, distance: int) -> Tuple[np.ndarr
     if not HAS_QCODEPLOT:
         raise ImportError(f"Cannot generate {code_type}: qcodeplot3d package is not installed.")
 
-    # 
     if code_type == "cubic": graph = cubic_3d_dual_graph(distance)
     elif code_type == "tetrahedral": graph = tetrahedron_3d_dual_graph(distance)
     elif code_type == "triangular": graph = triangular_2d_dual_graph(distance)
@@ -105,7 +119,6 @@ def get_parity_matrices(val: int, config: dict):
         G_punctured = GenMat[:, :-1]
         Hz = Hx = G_punctured.null_space() 
     else:
-        # Load Separate Hx and Hz files
         path_x = os.path.join(base_dir, f"n{n}_d{d}_Hx{suffix}")
         path_z = os.path.join(base_dir, f"n{n}_d{d}_Hz{suffix}")
         
@@ -113,39 +126,30 @@ def get_parity_matrices(val: int, config: dict):
             Hx = F2(readAlist(path_x))
             Hz = F2(readAlist(path_z))
         else:
-            # Fallback for old specific codes like n=17
             if n == 17:
                  path_x = os.path.join(base_dir, f"n{n}_d{d}_Hx.alist")
                  path_z = os.path.join(base_dir, f"n{n}_d{d}_Hz.alist")
                  Hx = F2(readAlist(path_x))
                  Hz = F2(readAlist(path_z))
             else:
-                raise FileNotFoundError(f"Missing separate files: {path_x} OR {path_z}")
+                raise FileNotFoundError(f"Missing separate files:\n  X: {path_x}\n  Z: {path_z}")
 
     return np.array(Hx, dtype=np.uint8), np.array(Hz, dtype=np.uint8)
 
 def find_logical_operator(Hx, Hz, basis="Z"):
-    """
-    Finds a logical operator using proper Galois Field arithmetic.
-    """
     F2 = galois.GF(2)
     gf_Hx = F2(Hx.astype(int))
     gf_Hz = F2(Hz.astype(int))
-    
     candidates_basis = gf_Hx.null_space() if basis == "Z" else gf_Hz.null_space()
     stabilizers = gf_Hz if basis == "Z" else gf_Hx
-    
     if not isinstance(stabilizers, F2):
         stabilizers = F2(stabilizers.astype(int))
-    
     stab_rank = np.linalg.matrix_rank(stabilizers)
     for cand in candidates_basis:
         cand_row = np.atleast_2d(cand)
         combined = np.concatenate((stabilizers, cand_row), axis=0)
-        
         if np.linalg.matrix_rank(combined) > stab_rank:
             return np.array(cand, dtype=np.uint8)
-            
     if candidates_basis.shape[0] > 0:
         rows = candidates_basis
         for i in range(len(rows)):
@@ -153,29 +157,42 @@ def find_logical_operator(Hx, Hz, basis="Z"):
                 cand = rows[i] + rows[j]
                 cand_row = np.atleast_2d(cand)
                 combined = np.concatenate((stabilizers, cand_row), axis=0)
-                
                 if np.linalg.matrix_rank(combined) > stab_rank:
                     return np.array(cand, dtype=np.uint8)
-
     raise ValueError(f"Could not find a Logical {basis} operator!")
 
-def parse_and_average_stats(stats: List[sinter.TaskStats], trace_file: str, model_name: str) -> pd.DataFrame:
-    avg_obj = 0.0; avg_cpu = 0.0
-    try:
-        df_details = SinterMWPFDecoder.parse_mwpf_trace(trace_file)
-        if not df_details.empty:
-            avg_obj = df_details['objective_value'].mean()
-            avg_cpu = df_details['cpu_time'].mean()
-    except Exception:
-        pass
+def parse_and_average_stats(stats: List[sinter.TaskStats], model_name: str) -> pd.DataFrame:
 
     results = []
+    
     for s in stats:
         m = s.json_metadata
+        trace_file = m.get('trace_path')
+        
+        avg_obj = 0.0
+        avg_cpu = 0.0
+        
+        if trace_file and glob.glob(f"{trace_file}*"):
+            try:
+                df_details = SinterMWPFDecoder.parse_mwpf_trace(trace_file)
+                if not df_details.empty:
+                    avg_obj = df_details['objective_value'].mean()
+                    avg_cpu = df_details['cpu_time'].mean()
+            except Exception as e:
+                # Log warning but continue
+                pass
+
         results.append({
-            'noise_model': model_name, 'n': m['n'], 'd': m['d'], 'r': m['r'], 'p': m['p'],
-            'code_type': m.get('code_type', 'unknown'), 'shots': s.shots, 'errors': s.errors,
+            'noise_model': model_name, 
+            'n': m.get('n'), 
+            'd': m.get('d'), 
+            'r': m.get('r'), 
+            'p': m.get('p'),
+            'code_type': m.get('code_type', 'unknown'), 
+            'shots': s.shots, 
+            'errors': s.errors,
             'total_logical_error_rate': s.errors / s.shots if s.shots > 0 else 0,
-            'mean_objective_value': avg_obj, 'average_cpu_time_seconds': avg_cpu,
+            'mean_objective_value': avg_obj, 
+            'average_cpu_time_seconds': avg_cpu,
         })
     return pd.DataFrame(results)
