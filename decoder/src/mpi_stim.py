@@ -87,7 +87,6 @@ def main():
         if not my_tasks: continue
 
         # 3. Setup Custom Decoders for Isolation
-        # We create a unique decoder ID and unique trace file for EVERY task.
         custom_decoders = {}
         
         for task in my_tasks:
@@ -116,7 +115,6 @@ def main():
             )
 
         # 4. Run Sinter (Batch Mode)
-        # We pass ALL tasks at once so Sinter can calculate ETA and show the table.
         resume_path = os.path.join(tmp_dir, f"resume_{base_filename}_{model_name}_{proc_rank}.sinter")
         part_filename = os.path.join(results_dir, f"{base_filename}_{model_name}_rank{proc_rank}{output_ext}")
         

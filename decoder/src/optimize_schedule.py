@@ -31,21 +31,29 @@ def get_effective_distance(circuit: stim.Circuit) -> int:
     Returns 0 if calculation fails.
     """
     try:
-        # decompose_errors=True attempts to break hyperedges, but isn't magic.
-        # ignore_ungraphlike_errors=True allows the code to run even if some errors are complex.
         return len(circuit.shortest_graphlike_error(
             ignore_ungraphlike_errors=True,
             decompose_errors=True
         ))
     except ValueError:
-        # This usually implies the error graph is empty or disconnected due to hyperedges
         return 0
+
+def add_interaction_noise(circuit: stim.Circuit, noise_prob: float) -> stim.Circuit:
+    noisy = stim.Circuit()
+    for cmd in circuit:
+        noisy.append(cmd)
+        if cmd.name in ["TICK", "SHIFT_COORDS", "QUBIT_COORDS", "DETECTOR", "OBSERVABLE_INCLUDE"]:
+            continue
+        noisy.append("X_ERROR", cmd.targets_copy(), noise_prob)
+    
+    return noisy
 
 def evaluate_schedule(args):
     Hx, Hz, rounds, perm_indices, adjacency, data_qubits = args
     
     schedule = {}
     for anc_idx, targets in adjacency.items():
+        # Map the permutation logic to the schedule format
         current_perm = perm_indices[:len(targets)]
         for priority, target_index_in_list in enumerate(current_perm):
             if target_index_in_list < len(targets):
@@ -53,25 +61,20 @@ def evaluate_schedule(args):
                 schedule[(anc_idx, data_idx)] = priority
 
     try:
-        # Generate circuit
+        # 1. Generate the noiseless circuit
         circuit = generate_css_memory_experiment(
             Hx, Hz, rounds=rounds, memory_basis="Z", schedule=schedule
         )
         
-        # Add noise to create the error graph
-        noisy_circuit = standard_depolarizing_noise_model(
-            circuit=circuit,
-            data_qubits=data_qubits,
-            after_clifford_depolarization=0.001,
-            after_reset_flip_probability=0.001,
-            before_measure_flip_probability=0.001,
-            before_round_data_depolarization=0.001
-        )
+        # 2. Add Simple Bit-Flip Noise
+        noisy_circuit = add_interaction_noise(circuit, noise_prob=1e-3)
         
+        # 3. Calculate Distance
         dist = get_effective_distance(noisy_circuit)
+        
         return dist, schedule
     except Exception:
-        # If construction fails entirely, return 0
+        # traceback.print_exc() # Uncomment for debugging
         return 0, schedule
 
 def optimize_code_schedule(val, config, max_attempts=500):
@@ -137,7 +140,6 @@ def optimize_code_schedule(val, config, max_attempts=500):
             candidates.append(tuple(p))
 
     # 5. Evaluate Candidates
-    # Use d if integer, else default to 5
     rounds = d + 1 if isinstance(d, int) and d > 0 else 5
     
     worker_args = [(Hx, Hz, rounds, p, adjacency, data_qubits) for p in candidates]
@@ -224,7 +226,7 @@ def main():
     summary_lines.append(f"{'Val':<6} | {'Eff. D':<8} | {'Theor. D':<8}")
     summary_lines.append("-" * 30)
     
-    print("\n" + "\n".join(summary_lines)) # Print header to console
+    print("\n" + "\n".join(summary_lines))
 
     for v, ed, td in summary_data:
         line = f"{v:<6} | {ed:<8} | {td:<8}"

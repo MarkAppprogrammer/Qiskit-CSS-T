@@ -42,14 +42,12 @@ BASE_ALIST_DIR_LOCAL = "./alistMats/"
 BASE_ALIST_DIR_PROJECT = os.path.join(DOUBLING_CSST_PATH, "alistMats/")
 BASE_ALIST_PATH = BASE_ALIST_DIR_LOCAL if os.path.exists(BASE_ALIST_DIR_LOCAL) else (BASE_ALIST_DIR_PROJECT if os.path.exists(BASE_ALIST_DIR_PROJECT) else BASE_ALIST_DIR_DEV)
 
-# 1. Existing Codes
 OP1_DIR = os.path.join(BASE_ALIST_PATH, "GO03_self_dual/")
 OP1_DICT = {4:2, 6:2, 8:2, 10:2, 12:4, 14:4, 16:4, 18:4, 20:4, 22:6, 24:6, 26:6, 28:6, 30:6, 32:8, 34:6, 36:8, 38:8, 40:8, 42:8, 44:8, 46:8, 48:8, 50:8, 52:10, 54:8, 56:10, 58:10, 60:12, 62:10, 64:10}
 
 OP2_DIR = os.path.join(BASE_ALIST_PATH, "QR_dual_containing/")
 OP2_DICT = {7:3, 17:5, 23:7, 47:11, 79:15, 103:19, 167:23}
 
-# 2. NEW: JA25 Triorthogonal Codes
 OP3_DIR = os.path.join(BASE_ALIST_PATH, "JA25_triorthogonal/")
 OP3_DICT = {15: 3, 49: 5, 95: 7, 185: 9, 189: 9, 279: 11}
 
