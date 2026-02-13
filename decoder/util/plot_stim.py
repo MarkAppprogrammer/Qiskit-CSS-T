@@ -4,27 +4,39 @@ import glob
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.stats
+import argparse
+import sys
 
-# --- CONFIGURATION ---
-INPUT_DIR = os.path.expandvars("$HOME/work/Qiskit-CSS-T/decoder/data/1/results")
-ALPHA = 0.05
-
-# Distance Dictionaries
+# --- CONFIGURATION & METADATA ---
 OP1_DICT = {4:2, 6:2, 8:2, 10:2, 12:4, 14:4, 16:4, 18:4, 20:4, 22:6, 24:6, 26:6, 28:6, 30:6, 32:8, 34:6, 36:8, 38:8, 40:8, 42:8, 44:8, 46:8, 48:8, 50:8, 52:10, 54:8, 56:10, 58:10, 60:12, 62:10, 64:10}
 OP2_DICT = {7:3, 17:5, 23:7, 47:11, 79:15, 103:19, 167:23}
 
-def get_dist_dict(code_type):
-    """Returns the correct distance dictionary based on code_type."""
-    if "dual_containing" in str(code_type):
-        return OP2_DICT
-    return OP1_DICT
+CODE_CONFIGS = {
+    "self_dual": { "source": "local", "dist_dict": OP1_DICT },
+    "dual_containing": { "source": "local", "dist_dict": OP2_DICT },
+    "cubic": { "source": "qcodeplot3d" },
+    "tetrahedral": { "source": "qcodeplot3d" },
+    "triangular": { "source": "qcodeplot3d" },
+    "square": { "source": "qcodeplot3d" }
+}
+
+ALPHA = 0.05
+
+def get_code_metadata(code_type, n, d_from_csv):
+    config = CODE_CONFIGS.get(code_type, {})
+    source = config.get("source", "unknown")
+    
+    if source == "local":
+        d_theo = config.get("dist_dict", {}).get(n, d_from_csv)
+        return f"n={n}, d={d_theo}", d_theo
+    else:
+        return f"d={d_from_csv} (n={n})", d_from_csv
 
 def load_and_aggregate_data(directory):
-    """
-    1. Loads all CSVs.
-    2. Aggregates shots/errors in memory (SUM).
-    3. Returns a clean DataFrame for plotting.
-    """
+    if not os.path.exists(directory):
+        print(f"Error: Directory not found: {directory}")
+        return pd.DataFrame()
+
     all_files = glob.glob(os.path.join(directory, "*.csv"))
     if not all_files:
         print(f"No CSV files found in {directory}")
@@ -33,7 +45,6 @@ def load_and_aggregate_data(directory):
     print(f"Found {len(all_files)} files. Loading and Aggregating...")
     df_list = []
     
-    # 1. Load Raw Data
     for f in all_files:
         try:
             temp_df = pd.read_csv(f)
@@ -45,49 +56,67 @@ def load_and_aggregate_data(directory):
     
     raw_df = pd.concat(df_list, ignore_index=True)
     
-    # Fill missing columns to ensure code doesn't break
-    defaults = {'code_type': 'self_dual', 'noise_model': 'unknown', 'n': 0, 'd': 0, 'p': 0.0, 'shots': 0, 'errors': 0}
+    # Fill defaults
+    defaults = {'code_type': 'unknown', 'noise_model': 'unknown', 'n': 0, 'd': 0, 'p': 0.0, 'shots': 0, 'errors': 0}
     for col, val in defaults.items():
         if col not in raw_df.columns:
             raw_df[col] = val
 
-    # 2. Aggregate In-Memory
+    # Aggregate
     group_cols = ['code_type', 'noise_model', 'n', 'd', 'p']
+    agg_rules = {'shots': 'sum', 'errors': 'sum'}
     
-    agg_rules = {
-        'shots': 'sum',
-        'errors': 'sum',
-    }
-    # Optional columns (take mean)
     if 'mean_objective_value' in raw_df.columns:
         agg_rules['mean_objective_value'] = 'mean'
     if 'average_cpu_time_seconds' in raw_df.columns:
         agg_rules['average_cpu_time_seconds'] = 'mean'
         
     agg_df = raw_df.groupby(group_cols, as_index=False).agg(agg_rules)
-    
-    # 3. Recalculate Logical Error Rate (Total Errors / Total Shots)
     agg_df['total_logical_error_rate'] = agg_df['errors'] / agg_df['shots']
     
     print(f"Aggregated {len(raw_df)} raw rows into {len(agg_df)} unique data points.")
     return agg_df
 
-# --- MAIN PLOTTING LOGIC ---
+def plot_data(df, output_dir="."):
+    if df.empty:
+        print("No data to plot.")
+        return
 
-df_all = load_and_aggregate_data(INPUT_DIR)
+    groups = df.groupby(['code_type', 'noise_model'])
 
-if not df_all.empty:
-    groups = df_all.groupby(['code_type', 'noise_model'])
+    # Style cycles to distinguish codes with same distance
+    LINE_STYLES = ['-', '--', '-.', ':']
+    MARKERS = ['o', 's', '^', 'D', 'v', '<', '>']
 
-    for (code_type, noise_model), df in groups:
+    for (code_type, noise_model), group_df in groups:
         print(f"Plotting: {code_type} - {noise_model}")
         
-        ns = sorted(df['n'].unique())
-        ps = sorted(df['p'].unique())
-        dist_dict = get_dist_dict(code_type)
+        # 1. Organize Data
+        curves = group_df.groupby(['n', 'd'])
+        sorted_curves = []
+        for (n, d), curve_data in curves:
+            label, d_val = get_code_metadata(code_type, n, d)
+            sorted_curves.append({
+                'n': n, 'd': d_val, 'data': curve_data.sort_values('p'),
+                'label': label, 'sort_key': d_val
+            })
+        
+        # Sort by distance, then by n
+        sorted_curves.sort(key=lambda x: (x['sort_key'], x['n']))
+
+        # 2. Setup Standard Colors
+        unique_ds = sorted(list(set(c['d'] for c in sorted_curves)))
+        prop_cycle = plt.rcParams['axes.prop_cycle']
+        std_colors = prop_cycle.by_key()['color']
+        d_color_map = {d: std_colors[i % len(std_colors)] for i, d in enumerate(unique_ds)}
+
+        # Track how many times we've seen each distance to cycle styles
+        d_counter = {d: 0 for d in unique_ds}
+
+        # 3. Setup Plot
+        ps = sorted(group_df['p'].unique())
         confidence_percent = int((1 - ALPHA) * 100)
         
-        # PLOT STYLING
         plt.rcParams.update({
             'font.size': 14, 'axes.titlesize': 18, 'axes.labelsize': 16,     
             'xtick.labelsize': 14, 'ytick.labelsize': 14, 'legend.fontsize': 12
@@ -95,93 +124,97 @@ if not df_all.empty:
 
         fig = plt.figure(figsize=(18, 12))
         gs = fig.add_gridspec(2, 6, height_ratios=[3, 2])
-
         ax_total = fig.add_subplot(gs[0, :])
         ax_obj = fig.add_subplot(gs[1, 0:3])
         ax_time = fig.add_subplot(gs[1, 3:6])
 
-        # --- 1. Total Logical Error Rate ---
-        for n in ns:
-            subset = df[df['n'] == n].sort_values('p')
-            if subset.empty: continue
+        # 4. Plot Loops
+        for i, curve in enumerate(sorted_curves):
+            subset = curve['data']
+            d = curve['d']
+            
+            # Color by distance
+            color = d_color_map[d]
+            
+            # Style by count (same color, different style)
+            style_idx = d_counter[d]
+            ls = LINE_STYLES[style_idx % len(LINE_STYLES)]
+            mk = MARKERS[style_idx % len(MARKERS)]
+            d_counter[d] += 1
 
-            d = dist_dict.get(n, subset['d'].iloc[0])
             p_L = subset['total_logical_error_rate'].values
             shots_val = subset['shots'].values
             errors = subset['errors'].values
 
-            # Confidence Intervals
             lower_b = scipy.stats.beta.ppf(ALPHA / 2, errors, shots_val - errors + 1)
             lower_b[errors == 0] = 0.0
-            
             upper_b = scipy.stats.beta.ppf(1 - ALPHA / 2, errors + 1, shots_val - errors)
             upper_b[errors == shots_val] = 1.0
-            
             y_err = [p_L - lower_b, upper_b - p_L]
 
-            ax_total.errorbar(subset['p'], p_L, yerr=y_err, marker='o', linestyle='-', 
-                              label=f'n={n}, d={d}', capsize=3, alpha=0.8)
+            ax_total.errorbar(subset['p'], p_L, yerr=y_err, marker=mk, linestyle=ls, 
+                              label=curve['label'], color=color, capsize=3, alpha=0.8)
+            
+            if 'mean_objective_value' in subset.columns:
+                ax_obj.plot(subset['p'], subset['mean_objective_value'], 
+                            marker='s', linestyle=ls, color=color, label=f"d={d}")
 
-        # Break-even line
+            if 'average_cpu_time_seconds' in subset.columns:
+                ax_time.plot(subset['p'], subset['average_cpu_time_seconds'], 
+                             marker='^', linestyle=ls, color=color)
+
+        # --- Formatting Main Plot ---
         ax_total.plot(ps, ps, linestyle='--', color='black', alpha=0.4, label="Break-even")
         
-        # --- RESOLUTION LIMIT (WITH SHADING) ---
-        max_shots = df['shots'].max()
-        res_limit = 1.0 / max_shots
+        # Unreliable Region (Dynamic)
+        max_shots = group_df['shots'].max()
+        res_limit = 1.0 / max_shots if max_shots > 0 else 1e-9
+        y_bottom = res_limit * 0.1 
         
-        # Draw the line
         ax_total.axhline(y=res_limit, color='gray', linestyle=':', alpha=0.5)
-        
-        # Shade the area below (using 1e-10 as effective zero for log plot)
-        # We extend the x-range slightly to cover the full width
         x_min, x_max = min(ps), max(ps)
-        ax_total.fill_between([x_min * 0.5, x_max * 1.5], 1e-10, res_limit, 
+        ax_total.fill_between([x_min * 0.5, x_max * 1.5], y_bottom, res_limit, 
                               color='lightgray', alpha=0.3, label=f'Unreliable (< {res_limit:.1e})')
 
         ax_total.set_xscale('log')
         ax_total.set_yscale('log')
+        ax_total.set_ylim(bottom=y_bottom)
+        
         ax_total.set_xlabel('Physical Error Rate (p)')
         ax_total.set_ylabel(f'Logical Error Rate ({confidence_percent}% CI)')
-        ax_total.set_title(f'Total Logical Error: {code_type} ({noise_model})')
+        ax_total.set_title(f'Logical Error Rate: {code_type} ({noise_model})')
         ax_total.grid(True, which="both", ls="--", alpha=0.3)
-        
-        # Reset X-limits to fit data tightly (removes extra whitespace from shading)
         ax_total.set_xlim(min(ps)*0.8, max(ps)*1.2)
-        
-        handles, labels = ax_total.get_legend_handles_labels()
-        ax_total.legend(handles, labels, loc='center right', bbox_to_anchor=(1.0, 0.5))
+        ax_total.legend(loc='center right', bbox_to_anchor=(1.0, 0.5))
 
-        # --- 2. Mean Objective Value ---
-        if 'mean_objective_value' in df.columns:
-            for n in ns:
-                subset = df[df['n'] == n].sort_values('p')
-                ax_obj.plot(subset['p'], subset['mean_objective_value'], marker='s', linestyle=':', label=f'n={n}')
-            ax_obj.set_xscale('log')
-            ax_obj.set_xlabel('Physical Error Rate (p)')
-            ax_obj.set_ylabel('Weight')
-            ax_obj.set_title('Mean MWPF Objective Value')
-            ax_obj.grid(True, which="both", ls="--", alpha=0.3)
+        # Subplots
+        ax_obj.set_xscale('log'); ax_obj.set_xlabel('p'); ax_obj.set_ylabel('Weight'); ax_obj.set_title('Mean MWPF Objective')
+        ax_obj.grid(True, which="both", ls="--", alpha=0.3)
+        ax_time.set_xscale('log'); ax_time.set_yscale('log'); ax_time.set_xlabel('p'); ax_time.set_ylabel('Seconds'); ax_time.set_title('Avg Decoding Time')
+        ax_time.grid(True, which="both", ls="--", alpha=0.3)
 
-        # --- 3. CPU Time ---
-        if 'average_cpu_time_seconds' in df.columns:
-            for n in ns:
-                subset = df[df['n'] == n].sort_values('p')
-                ax_time.plot(subset['p'], subset['average_cpu_time_seconds'], marker='^', linestyle='-.')
-            ax_time.set_xscale('log')
-            ax_time.set_yscale('log')
-            ax_time.set_xlabel('Physical Error Rate (p)')
-            ax_time.set_ylabel('Seconds / Shot')
-            ax_time.set_title('Avg Decoding Time')
-            ax_time.grid(True, which="both", ls="--", alpha=0.3)
-
-        # Final Formatting
-        fig.suptitle(f'{code_type.replace("_", " ").title()} - {noise_model.capitalize()}', fontsize=22)
+        fig.suptitle(f'{code_type.replace("_", " ").title()} Analysis', fontsize=22)
         plt.tight_layout(rect=[0, 0, 1, 0.95])
         
-        output_filename = f"plot_{code_type}_{noise_model}.png"
-        plt.savefig(output_filename, dpi=300)
-        print(f"Saved plot to {output_filename}")
-        plt.show()
+        out_file = os.path.join(output_dir, f"plot_{code_type}_{noise_model}.png")
+        plt.savefig(out_file, dpi=300)
+        print(f"Saved plot to: {out_file}")
+        plt.close(fig)
 
-else:
-    print("No data found to plot.")
+def main():
+    parser = argparse.ArgumentParser(description="Plot QEC Simulation Results")
+    parser.add_argument("--input_dir", type=str, required=True, help="Directory containing .csv results")
+    parser.add_argument("--output_dir", type=str, default="$HOME/Desktop/Qiskit-CSS-T/decoder/fig/stim/", help="Directory to save plots (default: input_dir)")
+    args = parser.parse_args()
+
+    input_path = os.path.expandvars(args.input_dir)
+    output_path = os.path.expandvars(args.output_dir) if args.output_dir else input_path
+
+    if not os.path.exists(output_path):
+        os.makedirs(output_path)
+
+    df = load_and_aggregate_data(input_path)
+    plot_data(df, output_path)
+
+if __name__ == "__main__":
+    main()
